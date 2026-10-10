@@ -1,0 +1,103 @@
+# =============================================================
+# Secrets (NEVER commit these)
+# =============================================================
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+*.pem
+*.key
+secrets/
+credentials.json
+env*
+
+# Keep the template tracked
+!.env.example
+
+# =============================================================
+# Node / Next.js
+# =============================================================
+node_modules/
+.next/
+out/
+build/
+dist/
+.vercel/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+coverage/
+
+# =============================================================
+# Python (scrapers, data cleaning)
+# =============================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =============================================================
+# Jupyter / Databricks notebooks
+# =============================================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+.databricks/
+.databrickscfg
+
+# Strip outputs before committing notebooks if they contain data dumps
+# (or run: nbstripout --install)
+
+# =============================================================
+# Data (keep small, clean seed data; ignore raw scrapes)
+# =============================================================
+data/raw/
+data/tmp/
+data/cache/
+*.sqlite
+*.sqlite3
+*.db
+*.parquet
+*.csv.gz
+# Re-include the cleaned seed data used by the app
+!data/seed/
+!data/seed/**
+
+# =============================================================
+# Design exports (keep the Figma link in README, not huge files)
+# =============================================================
+design/*.fig
+design/exports/raw/
+
+# =============================================================
+# Logs and local runtime files
+# =============================================================
+logs/
+*.log
+.cache/
+tmp/
+temp/
+
+# =============================================================
+# OS and editors
+# =============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
