@@ -61,15 +61,15 @@
 Developed by [Team Name].
 
 | Member | Role |
-|---|---|
-|  | Frontend Developer |
+|--------|------|
+| Nora Hashem | Frontend Developer |
 | Sabrina Centeno | Backend Developer / AI Lead |
-| Member 3 | UI/UX Designer |
-| Member 4 | Full-Stack Developer |
+| Irene Valle | Frontend and UI/UX Designer |
+| Daniel Rangosch| Data Engineer |
 
 ## 🏆 Hackathon
 
-Created for [Hackathon Name] — 2026.
+Created for [UCF Hackathon] — 2026.
 
 ## 📄 License
 
