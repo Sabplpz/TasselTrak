@@ -1,2 +1,2 @@
-# KnightShift
-App for UCF students to plan their semester schedules.
+# TasselTrak
+App for UCF students to plan their semester schedules. 
