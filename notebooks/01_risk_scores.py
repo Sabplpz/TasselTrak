@@ -24,6 +24,7 @@ dbutils.library.restartPython()
 
 # 3. Set the Neon string for this session. Paste the DIRECT (unpooled) string, run the cell,
 #    then delete the string from the cell and clear the cell output. Do not commit it.
+#    (When run as a Job this cell is harmless: the NEON_URL job parameter takes priority.)
 import os
 os.environ["NEON_URL"] = "PASTE_STRING_HERE"
 print("set")
@@ -35,8 +36,16 @@ import os, json
 import pg8000.native
 from urllib.parse import urlparse, unquote
 
+# As a Databricks Job, the string arrives as the NEON_URL job parameter (fills this widget).
+# Interactively, it falls back to the NEON_URL environment variable set in cell 3.
+dbutils.widgets.text("NEON_URL", "")
+
+def _url():
+    v = dbutils.widgets.get("NEON_URL")
+    return v if v else os.environ["NEON_URL"]
+
 def neon():
-    u = urlparse(os.environ["NEON_URL"])
+    u = urlparse(_url())
     return pg8000.native.Connection(
         user=unquote(u.username), password=unquote(u.password),
         host=u.hostname, port=u.port or 5432,
