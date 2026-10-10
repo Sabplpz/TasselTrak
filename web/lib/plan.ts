@@ -1,5 +1,5 @@
 import { sql } from "@/lib/db";
-import { chat, extractJson, MODEL } from "@/lib/llm";
+import { chat, extractJson } from "@/lib/llm";
 
 export const PLAN_TERM = process.env.PLAN_TERM || "spring-2027";
 const SEAT_RISK_AT = 6; // same threshold the seeded seat_risk flags use
@@ -209,7 +209,7 @@ export async function generatePlan(studentId: number, advisorId?: number | null)
   const notes = (await sql`SELECT body FROM advisor_notes WHERE student_id = ${studentId} ORDER BY created_at DESC LIMIT 3`) as any[];
 
   // ---- ask the model
-  let modelName = MODEL;
+  let modelName = "unknown";
   let rationale = "";
   let picks: { course: Candidate; section: Section | null; reason: string; source: "ai" }[] = [];
   let llmError: string | null = null;
@@ -235,7 +235,13 @@ Rules: prefer CRITICAL PATH courses and lower chain depth, then courses that unl
 Reply with ONLY a JSON object, no prose outside it:
 {"rationale":"2-3 sentences on the overall plan","courses":[{"code":"COP 3502C","reason":"one sentence specific to this student"}]}`;
 
-    const reply = await chat([{ role: "user", content: prompt }], { maxTokens: 3500, timeoutMs: 45000, retries: 1 });
+    const { text: reply, model: usedModel } = await chat(
+      [
+        { role: "system", content: "You are a fast, precise academic-planning assistant. Do not deliberate at length: pick the courses and reply with the JSON immediately." },
+        { role: "user", content: prompt },
+      ],
+      { maxTokens: 8000, timeoutMs: 30000, budgetMs: 48000 });
+    modelName = usedModel;
     const parsed = extractJson<{ rationale?: string; courses?: { code: string; reason?: string }[] }>(reply);
     rationale = String(parsed.rationale ?? "").slice(0, 1200);
 
