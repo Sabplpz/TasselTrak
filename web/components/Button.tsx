@@ -1,27 +1,31 @@
 import Link from "next/link";
 
 const BASE =
-  "flex cursor-pointer items-center justify-center rounded-pill px-[22px] text-label-14 whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary disabled:cursor-not-allowed disabled:opacity-70";
+  "flex cursor-pointer items-center justify-center rounded-pill text-label-14 whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary disabled:cursor-not-allowed disabled:opacity-60";
 
 const VARIANTS = {
   primary:
-    "bg-ink-primary py-3 text-surface-card hover:bg-brand-gold hover:text-ink-on-gold disabled:hover:bg-ink-primary disabled:hover:text-surface-card",
-  secondary: "border-[1.5px] border-border-default py-3 text-ink-primary hover:border-ink-primary",
+    "bg-ink-primary text-surface-card hover:bg-brand-gold hover:text-ink-on-gold disabled:hover:bg-ink-primary disabled:hover:text-surface-card",
+  secondary:
+    "border-[1.5px] border-border-default text-ink-primary hover:border-ink-primary disabled:hover:border-border-default",
+  gold: "border-[1.5px] border-ink-on-gold bg-brand-gold text-ink-on-gold",
 };
 
-type Look = { variant?: keyof typeof VARIANTS; full?: boolean };
+const SIZES = { md: "px-[22px] py-3", sm: "px-[14px] py-2" };
 
-const look = ({ variant = "primary", full = true }: Look, className = "") =>
-  `${BASE} ${VARIANTS[variant]} ${full ? "w-full" : ""} ${className}`;
+type Look = { variant?: keyof typeof VARIANTS; size?: keyof typeof SIZES; full?: boolean };
+
+const look = ({ variant = "primary", size = "md", full = true }: Look, className = "") =>
+  `${BASE} ${VARIANTS[variant]} ${SIZES[size]} ${full ? "w-full" : ""} ${className}`;
 
 // Pill button. Full width by default; `full={false}` hugs the label.
-export function Button({ variant, full, className, ...props }: React.ComponentProps<"button"> & Look) {
-  return <button {...props} className={look({ variant, full }, className)} />;
+export function Button({ variant, size, full, className, ...props }: React.ComponentProps<"button"> & Look) {
+  return <button {...props} className={look({ variant, size, full }, className)} />;
 }
 
 // Same look, for navigation.
-export function ButtonLink({ variant, full, className, ...props }: React.ComponentProps<typeof Link> & Look) {
-  return <Link {...props} className={look({ variant, full }, className)} />;
+export function ButtonLink({ variant, size, full, className, ...props }: React.ComponentProps<typeof Link> & Look) {
+  return <Link {...props} className={look({ variant, size, full }, className)} />;
 }
 
 // Underlined text button, e.g. "Sign out".

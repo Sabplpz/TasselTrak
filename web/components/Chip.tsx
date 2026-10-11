@@ -82,3 +82,41 @@ export function Avatar({ name, size = "sm" }: { name: string; size?: keyof typeo
     </span>
   );
 }
+
+export type PlanStatus = "draft" | "in_review" | "approved" | "archived";
+
+const PLAN_STATUS: Record<PlanStatus, { label: string; icon: string | null; box: string }> = {
+  draft: {
+    label: "Draft",
+    icon: "/plan/status-draft.svg",
+    box: "border-ink-primary bg-surface-card text-ink-primary",
+  },
+  in_review: {
+    label: "In review",
+    icon: "/advisor/eye.svg",
+    box: "border-brand-gold bg-brand-gold-soft text-ink-primary",
+  },
+  approved: {
+    label: "Approved",
+    icon: "/login/check.svg",
+    box: "border-ink-primary bg-ink-primary text-surface-card",
+  },
+  archived: {
+    label: "Archived",
+    icon: null,
+    box: "border-dashed border-border-default bg-surface-sunken text-ink-secondary",
+  },
+};
+
+// Plan status as icon + label.
+export function PlanStatusChip({ status }: { status: PlanStatus }) {
+  const look = PLAN_STATUS[status];
+  return (
+    <span
+      className={`inline-flex flex-none items-center gap-[5px] rounded-pill border-[1.5px] py-[3px] pl-[7px] pr-[10px] text-caption-12 whitespace-nowrap ${look.box}`}
+    >
+      {look.icon && <Image src={look.icon} alt="" width={16} height={16} />}
+      {look.label}
+    </span>
+  );
+}

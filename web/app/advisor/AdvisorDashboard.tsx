@@ -7,8 +7,8 @@ import { Button, ButtonLink, TextButton } from "@/components/Button";
 import { Avatar, Pill, RiskChip, Tag, type RiskLevel } from "@/components/Chip";
 import { Select } from "@/components/Select";
 import { Skeleton, StateMessage } from "@/components/State";
-
-export type Advisor = { id: number; name: string; email: string; department: string | null };
+import { getJson, reasonOf } from "@/lib/fetchJson";
+import type { Advisor } from "@/lib/useAdvisorSession";
 
 // Row from GET /api/caseload
 type CaseloadStudent = {
@@ -40,25 +40,6 @@ type Detail = { id: number; error?: string; data?: StudentDetail };
 
 const SORTS = { "risk-desc": "Risk, high to low", "risk-asc": "Risk, low to high", name: "Name, A to Z" };
 type Sort = keyof typeof SORTS;
-
-// Fetches JSON. A failure throws an Error whose message finishes the sentence "We couldn't load … because".
-async function getJson<T>(url: string): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(url, { signal: AbortSignal.timeout(20000) });
-  } catch (e) {
-    const timedOut = e instanceof DOMException && e.name === "TimeoutError";
-    throw new Error(timedOut ? "the server took too long to answer" : "the connection dropped");
-  }
-  if (!res.ok) throw new Error(`the server returned an error (${res.status})`);
-  try {
-    return (await res.json()) as T;
-  } catch {
-    throw new Error("the server sent a response we couldn’t read");
-  }
-}
-
-const reasonOf = (e: unknown) => (e instanceof Error ? e.message : "something went wrong");
 
 const points = (score: number) => Math.round(score * 100);
 const plural = (n: unknown, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
