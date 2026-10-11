@@ -1,6 +1,6 @@
 import { sql } from "@/lib/db";
 import { ok, fail, serverError } from "@/lib/api";
-import { generatePlan } from "@/lib/plan";
+import { generatePlan } from "@/lib/planner";
 
 export const maxDuration = 60;
 
@@ -25,7 +25,7 @@ export async function POST(req: Request) {
     const done: { student: string; plan?: number; model?: string | null; error?: string }[] = [];
     for (const s of todo) {
       try {
-        const r = await generatePlan(s.id, null);
+        const r = await generatePlan(s.id, null, { allowFallback: true });
         done.push({ student: s.display_name, plan: r!.plan.id, model: r!.plan.modelName });
       } catch (e) {
         done.push({ student: s.display_name, error: (e as Error).message });
