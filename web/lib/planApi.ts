@@ -4,7 +4,16 @@
 
 // ---------------------------------------------------------------- shapes
 
-export type PlanIssue = { type: string; severity: "high" | "medium" | "low"; message: string };
+// `courseId` and `code` name the course a problem belongs to; a plan-level problem has neither.
+// `overridden` problems no longer block approval.
+export type PlanIssue = {
+  type: string;
+  severity: "high" | "medium" | "low";
+  message: string;
+  courseId?: number;
+  code?: string;
+  overridden?: boolean;
+};
 
 export type TermRef = { code: string; name: string };
 
@@ -52,6 +61,8 @@ export type PlanItem = {
     instructor: string | null;
   } | null;
   issues: PlanIssue[];
+  // set once an advisor approved the course despite a blocking problem
+  override: { advisorName: string | null; at: string; note: string } | null;
 };
 
 // The "plan object": returned by GET /api/plans/:id and by every route that changes a plan.
@@ -66,6 +77,8 @@ export type PlanResponse = {
     modelName: string | null;
     rationale: string | null;
     rationalePoints: string[] | null;
+    approvedAt: string | null;
+    approvedBy: string | null; // the advisor's name
     updatedAt: string;
   };
   term: TermRef; // the first planned term
@@ -74,6 +87,8 @@ export type PlanResponse = {
   items: PlanItem[];
   totals: { credits: number; target: number; courses: number; byTerm: { code: string; credits: number }[] };
   issues: PlanIssue[];
+  blockingIssues: PlanIssue[]; // each problem that blocks approval, once
+  canApprove: boolean; // the plan has courses and nothing blocks it
   readOnly: boolean; // approved plans cannot be edited until they are reopened
 };
 
@@ -118,6 +133,7 @@ const MESSAGES: Record<string, string> = {
   item_not_found: "That course is no longer in this plan.",
   course_not_found: "That course could not be found.",
   student_not_found: "This student could not be found.",
+  program_not_found: "That major could not be found.",
   term_not_found: "That term isn’t available for planning.",
   no_plan: "This student doesn’t have a plan yet.",
   // the plan can't be edited right now
@@ -133,7 +149,7 @@ const MESSAGES: Record<string, string> = {
   planner_failed: "The planner couldn’t finish the draft, so nothing on the board changed.",
   no_candidates: "There are no eligible courses with open sections to build a draft from.",
   cancelled: "Generating the draft was cancelled. Nothing was changed.",
-  // overrides and approval (next pass, listed so nothing falls through)
+  // overrides and approval
   not_authorized: "You aren’t authorized to override problems on a plan.",
   advisor_required: "Sign in as an advisor to do that.",
   note_required: "A written reason is needed to override a problem.",
@@ -144,6 +160,7 @@ const MESSAGES: Record<string, string> = {
   invalid_status: "The plan isn’t in the right state for that.",
   // ours, for failures that never reached the API
   invalid_request: "That request wasn’t valid.",
+  invalid_grade: "One of the grades isn’t a grade we recognise.",
   server_error: "The server ran into a problem.",
   timeout: "The server took too long to answer.",
   offline: "The connection dropped.",
@@ -185,7 +202,7 @@ export class PlanApiError extends Error {
 export const explain = (e: unknown) => (e instanceof PlanApiError ? e.message : MESSAGES.server_error);
 export const codeOf = (e: unknown) => (e instanceof PlanApiError ? e.code : "server_error");
 
-async function request<T>(
+export async function request<T>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   url: string,
   body?: object,
@@ -285,6 +302,37 @@ export const restoreCourse = (planId: number, courseId: number, advisorId: numbe
 // POST /api/plans/:id/courses/:courseId/confirm -> a suggested course becomes confirmed
 export const confirmCourse = (planId: number, courseId: number, advisorId: number) =>
   request<PlanResponse>("POST", `/api/plans/${planId}/courses/${courseId}/confirm`, { advisorId });
+
+// ---------------------------------------------------------------- review and approval
+// Each returns the updated plan object.
+
+// POST /api/plans/:id/approve { advisorId } -> approved and read-only. 409 blocking_issues while
+// problems remain, 409 already_approved / empty_plan. With `overrideNote` it also overrides every
+// remaining blocking problem: 403 not_authorized, 400 note_required.
+export const approvePlan = (planId: number, advisorId: number, overrideNote?: string) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/approve`, {
+    advisorId,
+    ...(overrideNote ? { override: true, note: overrideNote } : {}),
+  });
+
+// POST /api/plans/:id/courses/:courseId/override { advisorId, note } -> the course's blocking
+// problems stop counting. 403 not_authorized, 400 note_required, 409 nothing_to_override.
+export const overrideCourse = (planId: number, courseId: number, advisorId: number, note: string) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/courses/${courseId}/override`, { advisorId, note });
+
+// POST /api/plans/:id/submit-review -> draft to in review. 409 invalid_status / empty_plan.
+export const submitForReview = (planId: number, advisorId: number) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/submit-review`, { advisorId });
+
+// POST /api/plans/:id/back-to-draft -> in review to draft. 409 invalid_status.
+export const backToDraft = (planId: number, advisorId: number) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/back-to-draft`, { advisorId });
+
+// POST /api/plans/:id/reopen -> approved to draft; the board can be edited again. 409 invalid_status.
+export const reopenPlan = (planId: number, advisorId: number) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/reopen`, { advisorId });
+
+// ---------------------------------------------------------------- generating a draft
 
 // POST /api/students/:id/plan/generate { advisorId, replace } -> 201 plan object for a NEW plan.
 // 409 plan_exists { planId, status } unless `replace` is true; 409 plan_approved; 504

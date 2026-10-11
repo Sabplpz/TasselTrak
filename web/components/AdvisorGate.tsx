@@ -4,7 +4,7 @@ import { useAdvisorSession, type Advisor } from "@/lib/useAdvisorSession";
 import { TopBar } from "@/components/TopBar";
 import { Button } from "@/components/Button";
 
-function Notice({ title, children, onSignOut }: { title: string; children: React.ReactNode; onSignOut: () => void }) {
+export function Notice({ title, children, onSignOut }: { title: string; children: React.ReactNode; onSignOut: () => void }) {
   return (
     <main className="flex min-h-dvh flex-col bg-surface-canvas text-ink-primary">
       <TopBar surface />

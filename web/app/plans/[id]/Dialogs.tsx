@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { Button, TextButton } from "@/components/Button";
-import type { CourseOption, CourseOptions, Dependent, TermRef } from "@/lib/planApi";
+import type { CourseOption, CourseOptions, Dependent, PlanIssue, TermRef } from "@/lib/planApi";
 
-const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
 const humanize = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 // Modal dialog: closes on Escape or a click outside, keeps Tab inside, and puts focus on the
@@ -178,6 +178,174 @@ export function RemoveDialog({
         </Button>
         <Button size="sm" full={false} onClick={onRemove} disabled={busy} data-autofocus>
           {busy ? "Removing…" : "Remove"}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- approve a plan
+
+// Shown when problems still block approval. Each one can be fixed on the board or, by an advisor
+// who is authorized, overridden with a written reason.
+export function ApproveDialog({
+  firstName,
+  issues,
+  canOverride,
+  busy,
+  onView,
+  onOverride,
+  onOverrideAll,
+  onApprove,
+  onClose,
+}: {
+  firstName: string;
+  issues: PlanIssue[]; // the plan's blocking problems, as they stand now
+  canOverride: boolean;
+  busy: boolean;
+  onView: (issue: PlanIssue) => void; // show the course on the board
+  onOverride: (issue: PlanIssue) => void;
+  onOverrideAll: () => void;
+  onApprove: () => void;
+  onClose: () => void;
+}) {
+  const clear = issues.length === 0;
+  const count = `${issues.length} ${issues.length === 1 ? "problem" : "problems"}`;
+  return (
+    <Modal
+      scrim
+      label={clear ? `Approve ${firstName}’s plan` : `${count} to resolve before approval`}
+      onClose={onClose}
+      className="flex max-h-[min(640px,calc(100dvh-32px))] w-full max-w-[520px] flex-col gap-[18px] rounded-panel bg-surface-card px-7 pb-6 pt-[26px] shadow-panel"
+    >
+      <div className="flex flex-none flex-col gap-1.5">
+        <h2 className="text-heading-28 text-ink-primary">{clear ? "Nothing is blocking this plan" : `${count} to resolve`}</h2>
+        <p className="text-body-16 text-ink-secondary">
+          {clear
+            ? `Every problem is fixed or overridden. ${firstName}’s plan can be approved.`
+            : `${firstName}’s plan can’t be approved until ${issues.length === 1 ? "this is" : "these are"} fixed${
+                canOverride ? " or overridden" : ""
+              }.`}
+        </p>
+      </div>
+
+      {!clear && (
+        <ul className="-mx-7 flex min-h-0 flex-col overflow-y-auto px-7">
+          {issues.map((issue, i) => (
+            <li key={i} className={`flex items-start gap-2 py-[10px] ${i > 0 ? "border-t border-border-subtle" : ""}`}>
+              <Image src="/plan/error-small.svg" alt="" width={18} height={18} className="mt-px flex-none" />
+              <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
+                <p className="text-body-14 text-ink-primary">{issue.message}</p>
+                {issue.courseId && issue.code && (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <TextButton className="text-caption-12" aria-label={`View ${issue.code} on the board`} onClick={() => onView(issue)}>
+                      View {issue.code}
+                    </TextButton>
+                    {canOverride && (
+                      <TextButton
+                        className="text-caption-12 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={busy}
+                        aria-label={`Override the problem with ${issue.code}`}
+                        onClick={() => onOverride(issue)}
+                      >
+                        Override
+                      </TextButton>
+                    )}
+                  </div>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="flex flex-none flex-wrap gap-[10px]">
+        {clear ? (
+          <Button full={false} disabled={busy} onClick={onApprove} data-autofocus>
+            {busy ? "Approving…" : "Approve plan"}
+          </Button>
+        ) : (
+          <>
+            <Button full={false} onClick={onClose} data-autofocus>
+              Back to the board
+            </Button>
+            {canOverride && (
+              <Button variant="secondary" full={false} disabled={busy} onClick={onOverrideAll}>
+                Override all and approve
+              </Button>
+            )}
+          </>
+        )}
+      </div>
+      {!clear && !canOverride && (
+        <p className="flex-none text-caption-12-regular text-ink-secondary">
+          You aren&rsquo;t authorized to override problems. Fix them on the board, or ask an advisor who is.
+        </p>
+      )}
+    </Modal>
+  );
+}
+
+// The written reason an override needs.
+export function OverrideDialog({
+  title,
+  problems,
+  confirmLabel,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  problems: string[]; // what is being overridden
+  confirmLabel: string;
+  busy: boolean;
+  error: string | null; // the API's refusal, if the last try failed
+  onCancel: () => void;
+  onConfirm: (note: string) => void;
+}) {
+  const [note, setNote] = useState("");
+  const noteId = useId();
+  return (
+    <Modal
+      scrim
+      label={title}
+      onClose={onCancel}
+      className="flex w-full max-w-[460px] flex-col gap-[14px] rounded-panel bg-surface-card px-7 pb-6 pt-[26px] shadow-panel"
+    >
+      <h2 className="text-title-18 text-ink-primary">{title}</h2>
+      <ul className="flex max-h-[160px] flex-col gap-1.5 overflow-y-auto rounded-field border border-border-subtle bg-surface-canvas px-3 py-[10px] text-body-14 text-ink-primary">
+        {problems.map((problem, i) => (
+          <li key={i}>{problem}</li>
+        ))}
+      </ul>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={noteId} className="text-caption-12 text-ink-secondary">
+          Reason for the override
+        </label>
+        <textarea
+          id={noteId}
+          data-autofocus
+          rows={3}
+          value={note}
+          disabled={busy}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Why this is fine for this student"
+          className="w-full resize-none rounded-field border-[1.5px] border-ink-muted bg-surface-card px-[14px] py-[10px] text-body-14 text-ink-primary outline-none placeholder:text-ink-muted focus:border-brand-gold focus:ring-4 focus:ring-brand-gold/25 disabled:opacity-70"
+        />
+        <p className="text-caption-12-regular text-ink-secondary">Saved on the plan with your name and the date.</p>
+      </div>
+      {error && (
+        <p role="alert" className="text-body-14 text-ink-primary">
+          {error}
+        </p>
+      )}
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" size="sm" full={false} onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <Button size="sm" full={false} disabled={busy || !note.trim()} onClick={() => onConfirm(note.trim())}>
+          {busy ? "Saving…" : confirmLabel}
         </Button>
       </div>
     </Modal>

@@ -43,6 +43,7 @@ function CourseRef({ code, board }: { code: string; board: Board }) {
 }
 
 const time = (t: string | null) => t?.slice(0, 5) ?? "";
+const day = (iso: string) => new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
 type Alternatives = { status: "closed" } | { status: "loading" } | { status: "error"; reason: string } | { status: "ready"; list: Alternative[] };
 
@@ -53,12 +54,14 @@ function SelectedCourse({
   board,
   prerequisites,
   busy,
+  canOverride,
   onClose,
   onAdd,
   onMove,
   onConfirm,
   onSwap,
   onRemove,
+  onOverride,
 }: {
   planId: number;
   terms: TermRef[]; // the plan terms on the board
@@ -66,12 +69,14 @@ function SelectedCourse({
   board: Board;
   prerequisites: Prerequisite[];
   busy: boolean; // a request is in flight, or the plan is read-only
+  canOverride: boolean; // this advisor may override a blocking problem
   onClose: () => void;
   onAdd: (course: BoardCourse, term: TermRef) => void;
   onMove: (course: BoardCourse, term: TermRef) => void;
   onConfirm: (course: BoardCourse) => void;
   onSwap: (course: BoardCourse, alternative: Alternative) => void;
   onRemove: (course: BoardCourse) => void;
+  onOverride: (course: BoardCourse) => void;
 }) {
   const [alternatives, setAlternatives] = useState<Alternatives>({ status: "closed" });
   const groups = prerequisiteGroups(course.code, prerequisites);
@@ -246,6 +251,19 @@ function SelectedCourse({
               <li key={i}>{issue.message}</li>
             ))}
           </ul>
+          {item.override ? (
+            <p className="text-caption-12-regular text-ink-secondary">
+              Overridden{item.override.advisorName ? ` by ${item.override.advisorName}` : ""} on {day(item.override.at)}:{" "}
+              {item.override.note}
+            </p>
+          ) : (
+            canOverride &&
+            item.issues.some((issue) => issue.severity === "high" && !issue.overridden) && (
+              <Button variant="secondary" size="sm" full={false} disabled={busy} className="mt-1 self-start" onClick={() => onOverride(course)}>
+                Override
+              </Button>
+            )
+          )}
         </div>
       )}
 
@@ -334,6 +352,7 @@ export function PlanPanel({
   prerequisites,
   selected,
   busy,
+  canOverride,
   terms,
   editError,
   onDismissError,
@@ -343,12 +362,15 @@ export function PlanPanel({
   onConfirm,
   onSwap,
   onRemove,
+  onOverride,
+  onReopen,
 }: {
   plan: PlanResponse;
   board: Board;
   prerequisites: Prerequisite[];
   selected: BoardCourse | null;
   busy: boolean;
+  canOverride: boolean;
   terms: TermRef[];
   editError: EditError | null;
   onDismissError: () => void;
@@ -358,6 +380,8 @@ export function PlanPanel({
   onConfirm: (course: BoardCourse) => void;
   onSwap: (course: BoardCourse, alternative: Alternative) => void;
   onRemove: (course: BoardCourse) => void;
+  onOverride: (course: BoardCourse) => void;
+  onReopen: () => void;
 }) {
   const { credits, target, courses } = plan.totals;
   const points = plan.plan.rationalePoints ?? [];
@@ -366,9 +390,17 @@ export function PlanPanel({
   return (
     <aside aria-label="Plan details" className={PANEL}>
       {plan.readOnly && (
-        <p className="flex-none rounded-field border border-border-subtle bg-surface-sunken px-3 py-[10px] text-body-14 text-ink-primary">
-          This plan is approved and read-only.
-        </p>
+        <div className="flex flex-none flex-col items-start gap-2 rounded-field border border-border-subtle bg-surface-sunken px-3 py-[10px]">
+          <p className="text-body-14 text-ink-primary">
+            {plan.plan.approvedBy && plan.plan.approvedAt
+              ? `Approved by ${plan.plan.approvedBy} on ${day(plan.plan.approvedAt)}.`
+              : "This plan is approved."}{" "}
+            It is read-only until it is reopened.
+          </p>
+          <TextButton className="disabled:cursor-not-allowed disabled:opacity-60" disabled={busy} onClick={onReopen}>
+            Reopen plan
+          </TextButton>
+        </div>
       )}
       {editError && (
         <section
@@ -402,12 +434,14 @@ export function PlanPanel({
           board={board}
           prerequisites={prerequisites}
           busy={busy || plan.readOnly}
+          canOverride={canOverride}
           onClose={() => onSelect(null)}
           onAdd={onAdd}
           onMove={onMove}
           onConfirm={onConfirm}
           onSwap={onSwap}
           onRemove={onRemove}
+          onOverride={onOverride}
         />
       )}
 

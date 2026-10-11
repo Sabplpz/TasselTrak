@@ -9,8 +9,8 @@ import { auth } from "@/lib/firebase";
 // Same Realtime Database the login page reads the role from.
 const ROLE_DB_URL = "https://tasseltrak-69d99-default-rtdb.firebaseio.com";
 
-// Row from GET /api/advisors
-export type Advisor = { id: number; name: string; email: string; department: string | null };
+// Row from GET /api/advisors. `can_override`: may approve a course despite a blocking problem.
+export type Advisor = { id: number; name: string; email: string; department: string | null; can_override: boolean };
 
 export type AdvisorSession =
   | { status: "checking" }

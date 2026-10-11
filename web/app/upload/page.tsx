@@ -8,6 +8,7 @@ import { TopBar } from "@/components/TopBar";
 import { Button, TextButton } from "@/components/Button";
 import { Avatar, Pill } from "@/components/Chip";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
 import { auth } from "@/lib/firebase";
@@ -264,6 +265,7 @@ async function handleSignOut() {
           <button className={styles.continueButton} type="button" onClick={handleContinue} disabled={!file}>
             Continue with degree audit <span aria-hidden="true">→</span>
           </button>
+          <p className={styles.howLink}>No audit handy? <Link href="/pick-courses">Pick courses manually</Link></p>
           <p className={styles.howLink} id="how-it-works">Not sure where to find your audit? <a href="#privacy">See how it works</a></p>
         </div>
       </section>
