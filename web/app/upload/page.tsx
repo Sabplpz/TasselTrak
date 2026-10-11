@@ -4,6 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
 import styles from "./upload.module.css";
 
+import { TopBar } from "@/components/TopBar";
+import { Button, TextButton } from "@/components/Button";
+import { Avatar, Pill } from "@/components/Chip";
+
 type Theme = "light" | "dark";
 
 function Mark() {
@@ -168,23 +172,19 @@ export default function UploadPage() {
   className={styles.page}
   data-theme={theme}
 >
-  
-      <header className={styles.topbar}>
-        <a className={styles.brand} href="/dashboard" aria-label="TasselTrak home">
-          <Mark />
-          <span>TasselTrak</span>
-        </a>
-        <nav className={styles.navLinks} aria-label="Main navigation">
-          <a href="#how-it-works">How it works</a>
-          <a href="#privacy">Is my audit private?</a>
-          <button className={styles.themeToggle} onClick={toggleTheme} type="button" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} mode`} title={`Switch to ${theme === "light" ? "dark" : "light"} mode`}>
-            <SunMoonIcon dark={theme === "dark"} />
-            <span>{theme === "light" ? "Dark mode" : "Light mode"}</span>
-          </button>
-          <button className={styles.avatar} type="button" aria-label="Account menu">N</button>
-          <button className={styles.signOut} type="button" onClick={() => setNotice("Connect this button to your existing sign-out handler.")}>Sign out</button>
-        </nav>
-      </header>
+    <TopBar surface tag={<Pill tone="gold">Student</Pill>}>
+
+
+    <Avatar name="Student" size="md" />
+
+    <TextButton
+      onClick={() =>
+        setNotice("Connect this button to your existing sign-out handler.")
+      }
+    >
+      Sign out
+    </TextButton>
+  </TopBar>
 
       <section className={styles.hero} aria-labelledby="hero-title">
         <div className={styles.backgroundArt} aria-hidden="true">
