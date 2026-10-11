@@ -18,12 +18,18 @@ export type AdvisorSession =
   | { status: "unlinked"; email: string | null }
   | { status: "error" };
 
-// Development only: ?advisorId= picks the advisor directly, so pages can be built before the
-// advisor accounts exist. The sign-in and role checks still run first. Never active in production.
-function devAdvisorId(): number | null {
-  if (process.env.NODE_ENV !== "development") return null;
-  const value = new URLSearchParams(window.location.search).get("advisorId");
-  return value && /^\d+$/.test(value) ? Number(value) : null;
+const toAdvisorId = (value: string | null | undefined) => (value && /^\d+$/.test(value) ? Number(value) : null);
+
+// Development only, so pages can be built before the advisor accounts exist. The sign-in and
+// role checks still run first, and both overrides do nothing in production.
+//   ?advisorId=                   always wins: act as that advisor for this page load.
+//   NEXT_PUBLIC_DEV_ADVISOR_ID    fallback: used only when the signed-in email matches no advisor.
+function devAdvisorOverride(): { query: number | null; fallback: number | null } {
+  if (process.env.NODE_ENV !== "development") return { query: null, fallback: null };
+  return {
+    query: toAdvisorId(new URLSearchParams(window.location.search).get("advisorId")),
+    fallback: toAdvisorId(process.env.NEXT_PUBLIC_DEV_ADVISOR_ID),
+  };
 }
 
 // Gate for advisor-only pages. Signed-out users go to /login and non-advisors to /dashboard.
@@ -54,12 +60,13 @@ export function useAdvisorSession() {
         const { advisors } = (await res.json()) as { advisors: Advisor[] };
         if (cancelled) return;
 
-        const overrideId = devAdvisorId();
+        const dev = devAdvisorOverride();
         const email = user.email?.trim().toLowerCase();
         const advisor =
-          overrideId !== null
-            ? advisors.find((a) => a.id === overrideId)
-            : advisors.find((a) => !!email && a.email?.trim().toLowerCase() === email);
+          dev.query !== null
+            ? advisors.find((a) => a.id === dev.query)
+            : (advisors.find((a) => !!email && a.email?.trim().toLowerCase() === email) ??
+              advisors.find((a) => a.id === dev.fallback));
 
         setSession(advisor ? { status: "ready", advisor } : { status: "unlinked", email: user.email });
       } catch {
