@@ -6,6 +6,8 @@ import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { getDatabase, ref, get } from "firebase/database";
 import { auth } from "../../lib/firebase";
 import { useRouter } from "next/navigation";
+import { TopBar } from "@/components/TopBar";
+import { Button } from "@/components/Button";
 
 type Role = "student" | "advisor";
 
@@ -239,9 +241,6 @@ function RoleCard({
   );
 }
 
-const PRIMARY_BUTTON =
-  "w-full cursor-pointer rounded-pill bg-ink-primary px-[22px] py-3 text-label-14 text-surface-card transition-colors hover:bg-brand-gold hover:text-ink-on-gold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:bg-ink-primary disabled:hover:text-surface-card";
-
 const INPUT =
   "w-full disabled:cursor-not-allowed disabled:opacity-70 rounded-field border-[1.5px] border-ink-muted bg-surface-card px-[14px] py-3 text-body-14 text-ink-primary outline-none transition-shadow placeholder:text-ink-muted focus:border-brand-gold focus:ring-4 focus:ring-brand-gold/25";
 
@@ -390,13 +389,7 @@ export default function LoginPage() {
 
   return (
     <main className="flex min-h-screen flex-1 flex-col bg-surface-canvas text-ink-primary">
-      {/* Top bar */}
-      <header className="relative z-10 flex h-16 flex-none items-center px-6">
-        <div className="flex items-center gap-[10px]">
-          <Image src="/logo.png" alt="TasselTrak logo" width={40} height={40} priority className="object-contain" />
-          <span className="text-title-18 text-ink-primary">TasselTrak</span>
-        </div>
-      </header>
+      <TopBar />
 
       <div className="relative flex flex-1 flex-col items-center pb-12 short:pb-6 short:pt-3">
         <BackgroundArt />
@@ -474,9 +467,9 @@ export default function LoginPage() {
 
               {error && <ErrorNote>{error}</ErrorNote>}
 
-              <button type="submit" disabled={loading} className={PRIMARY_BUTTON}>
+              <Button type="submit" disabled={loading}>
                 {loading ? "Signing in..." : "Sign in"}
-              </button>
+              </Button>
             </form>
           </div>
         </section>
