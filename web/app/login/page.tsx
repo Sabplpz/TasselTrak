@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { signInWithEmailAndPassword } from "firebase/auth";
+import { FirebaseError } from "firebase/app";
 import { auth } from "../../lib/firebase";
 import { useRouter } from "next/navigation";
 
@@ -13,6 +14,22 @@ const ADVISORS = [
   { id: "marcus-hale", initials: "MH", name: "Marcus Hale", dept: "Information Technology", students: 18 },
   { id: "wei-zhang", initials: "WZ", name: "Dr. Wei Zhang", dept: "Computer Engineering", students: 27 },
 ];
+
+function authMessage(err: unknown) {
+  if (err instanceof FirebaseError) {
+    switch (err.code) {
+      case "auth/invalid-credential":
+      case "auth/wrong-password":
+      case "auth/user-not-found":
+        return "Incorrect email or password.";
+      case "auth/too-many-requests":
+        return "Too many attempts. Try again later.";
+      case "auth/network-request-failed":
+        return "Network error. Check your connection.";
+    }
+  }
+  return "Something went wrong. Please try again.";
+}
 
 function CapIcon({ size = 20, color = "#ffc900" }: { size?: number; color?: string }) {
   return (
@@ -66,8 +83,7 @@ export default function LoginPage() {
       await signInWithEmailAndPassword(auth, email, password);
       router.push("/dashboard");
     } catch (err) {
-      console.error(err);
-      setError("Email o contraseña incorrectos.");
+      setError(authMessage(err));
     } finally {
       setLoading(false);
     }
@@ -92,9 +108,6 @@ export default function LoginPage() {
           </span>
           <span>TasselTrak</span>
         </div>
-        <a href="#how" className="tt-nav-link">
-          How it works
-        </a>
       </header>
 
       {/* Connector lines between floating cards */}
