@@ -1,0 +1,7 @@
+{
+  "name": "tasseltrak-figma-alignment-students-tests",
+  "private": true,
+  "scripts": { "test": "tsx --tsconfig tsconfig.json run.ts",
+    "typecheck": "tsc -p tsconfig.check.json" },
+  "devDependencies": { "@electric-sql/pglite": "^0.3.0", "@types/node": "^22.0.0", "tsx": "^4.19.0", "typescript": "^5.6.0" }
+}
