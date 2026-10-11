@@ -37,8 +37,8 @@ function PeopleIcon({
   size = 20,
   color = "#ffc900",
 }: {
-    size?: number;
-    color?: string;
+  size?: number;
+  color?: string;
 }) {
   return (
     <svg
@@ -92,15 +92,22 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   function selectRole(nextRole: Role) {
+    if (loading) return;
+
     setRole(nextRole);
     setError("");
+    setPassword("");
   }
 
   async function handleLogin(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    if (loading) return;
+
     setError("");
     setLoading(true);
 
+    const selectedRole = role;
     let authenticated = false;
 
     try {
@@ -125,19 +132,23 @@ export default function LoginPage() {
 
       if (savedRole !== "student" && savedRole !== "advisor") {
         await signOut(auth);
+        setPassword("");
         setError(
-          "Tu cuenta no tiene un rol válido asignado. Contacta al administrador."
+          "Your account does not have a valid role assigned. Please contact the administrator."
         );
         return;
       }
 
-      if (savedRole !== role) {
+      if (savedRole !== selectedRole) {
         await signOut(auth);
+        setPassword("");
+
         setError(
-          savedRole === "student"
-            ? 'Tu cuenta es de estudiante. Selecciona "I’m a student".'
-            : 'Tu cuenta es de advisor. Selecciona "I’m an advisor".'
+          savedRole === "advisor"
+            ? 'Advisor accounts are not permitted in the student login. Please select "I’m an advisor".'
+            : 'Student accounts are not permitted in the advisor login. Please select "I’m a student".'
         );
+
         return;
       }
 
@@ -149,13 +160,52 @@ export default function LoginPage() {
 
       if (authenticated) {
         await signOut(auth).catch(console.error);
+        setPassword("");
         setError(
-          "No se pudo leer tu rol. Revisa el UID y las Rules de Firebase."
+          "We could not verify your account role. Please try again or contact the administrator."
         );
       } else {
-        setError(
-          "No se pudo iniciar sesión. Revisa tu correo y contraseña."
-        );
+        const code =
+          typeof err === "object" &&
+          err !== null &&
+          "code" in err
+            ? String(err.code)
+            : "";
+
+        switch (code) {
+          case "auth/invalid-email":
+            setError("Please enter a valid email address.");
+            break;
+
+          case "auth/invalid-credential":
+          case "auth/user-not-found":
+          case "auth/wrong-password":
+            setError(
+              "Incorrect email or password. Please try again."
+            );
+            break;
+
+          case "auth/user-disabled":
+            setError(
+              "Your account has been disabled. Please contact the administrator."
+            );
+            break;
+
+          case "auth/too-many-requests":
+            setError(
+              "Too many login attempts. Please try again later."
+            );
+            break;
+
+          case "auth/network-request-failed":
+            setError(
+              "Connection error. Please check your internet connection and try again."
+            );
+            break;
+
+          default:
+            setError("Unable to sign in. Please try again.");
+        }
       }
     } finally {
       setLoading(false);
@@ -337,13 +387,18 @@ export default function LoginPage() {
               <span className="tt-role-icon">
                 <CapIcon />
               </span>
+
               {role === "student" ? (
                 <span className="tt-pill">&#10003; Selected</span>
               ) : (
                 <span className="tt-radio" />
               )}
             </div>
-            <div className="tt-role-title">I&rsquo;m a student</div>
+
+            <div className="tt-role-title">
+              I&rsquo;m a student
+            </div>
+
             <div className="tt-role-sub">
               Plan your courses and see what&rsquo;s left.
             </div>
@@ -360,13 +415,18 @@ export default function LoginPage() {
               <span className="tt-role-icon">
                 <PeopleIcon />
               </span>
+
               {role === "advisor" ? (
                 <span className="tt-pill">&#10003; Selected</span>
               ) : (
                 <span className="tt-radio" />
               )}
             </div>
-            <div className="tt-role-title">I&rsquo;m an advisor</div>
+
+            <div className="tt-role-title">
+              I&rsquo;m an advisor
+            </div>
+
             <div className="tt-role-sub">
               See your students and who needs attention.
             </div>
@@ -376,12 +436,14 @@ export default function LoginPage() {
         <div className="tt-panel">
           <div className="tt-panel-head">
             <h2>
-              {role === "advisor" ? "Advisor Login" : "Student Login"}
+              {role === "advisor"
+                ? "Advisor Login"
+                : "Student Login"}
             </h2>
             <span>UCF email</span>
           </div>
 
-          <form onSubmit={handleLogin} className="tt-form">
+          <form onSubmit={handleLogin} className="tt-form" noValidate>
             <input
               className="tt-input"
               type="email"
