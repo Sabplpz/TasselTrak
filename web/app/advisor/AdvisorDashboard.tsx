@@ -6,6 +6,7 @@ import { TopBar } from "@/components/TopBar";
 import { Button, ButtonLink, TextButton } from "@/components/Button";
 import { Avatar, Pill, RiskChip, Tag, type RiskLevel } from "@/components/Chip";
 import { Select } from "@/components/Select";
+import { Skeleton, StateMessage } from "@/components/State";
 
 export type Advisor = { id: number; name: string; email: string; department: string | null };
 
@@ -23,7 +24,7 @@ type CaseloadStudent = {
 
 type Caseload =
   | { status: "loading" }
-  | { status: "error"; message: string }
+  | { status: "error"; reason: string }
   | { status: "ready"; students: CaseloadStudent[]; total: number };
 
 type RiskFactor = { raw?: Record<string, unknown>; contribution?: number };
@@ -39,6 +40,25 @@ type Detail = { id: number; error?: string; data?: StudentDetail };
 
 const SORTS = { "risk-desc": "Risk, high to low", "risk-asc": "Risk, low to high", name: "Name, A to Z" };
 type Sort = keyof typeof SORTS;
+
+// Fetches JSON. A failure throws an Error whose message finishes the sentence "We couldn't load … because".
+async function getJson<T>(url: string): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+  } catch (e) {
+    const timedOut = e instanceof DOMException && e.name === "TimeoutError";
+    throw new Error(timedOut ? "the server took too long to answer" : "the connection dropped");
+  }
+  if (!res.ok) throw new Error(`the server returned an error (${res.status})`);
+  try {
+    return (await res.json()) as T;
+  } catch {
+    throw new Error("the server sent a response we couldn’t read");
+  }
+}
+
+const reasonOf = (e: unknown) => (e instanceof Error ? e.message : "something went wrong");
 
 const points = (score: number) => Math.round(score * 100);
 const plural = (n: unknown, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -127,6 +147,9 @@ function Stat({ label, value, hug }: { label: string; value: React.ReactNode; hu
   );
 }
 
+const PANEL =
+  "absolute inset-y-4 right-4 z-10 flex w-[400px] max-w-[calc(100%-32px)] flex-col gap-6 rounded-panel border border-border-subtle bg-surface-card px-6 pb-6 pt-5 shadow-panel short:inset-y-3 short:gap-4 short:pb-4 short:pt-4";
+
 function StudentPanel({
   row,
   detail,
@@ -138,20 +161,57 @@ function StudentPanel({
   onRetry: () => void;
   onClose: () => void;
 }) {
-  const data = detail?.id === row.student_id ? detail.data : undefined;
-  const error = detail?.id === row.student_id ? detail.error : undefined;
+  const current = detail?.id === row.student_id ? detail : null;
   const firstName = row.display_name.trim().split(/\s+/)[0];
-  const sample = data?.student.is_synthetic === true;
 
-  const factors = Object.entries(data?.risk?.factors ?? {})
+  if (!current) {
+    return (
+      <aside
+        aria-label={`${row.display_name} details`}
+        aria-busy="true"
+        className={`${PANEL} overflow-hidden motion-safe:animate-pulse`}
+      >
+        <span className="sr-only" role="status">
+          Loading {row.display_name}…
+        </span>
+        <div className="flex flex-none items-center gap-[14px]">
+          <Skeleton className="size-[52px] rounded-pill" />
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-5 rounded-md" width={160} />
+            <Skeleton className="h-3 rounded-md" width={200} />
+          </div>
+        </div>
+        <div className="flex flex-none gap-2">
+          <Skeleton className="h-[58px] flex-1 rounded-field" />
+          <Skeleton className="h-[58px] flex-1 rounded-field" />
+          <Skeleton className="h-[58px] flex-1 rounded-field" />
+        </div>
+        <Skeleton className="h-3 rounded-md" width={150} />
+        <Skeleton className="h-[190px] w-full rounded-card" />
+        <Skeleton className="h-3 rounded-md" width={170} />
+        {[190, 170, 150].map((width) => (
+          <div key={width} className="flex flex-none items-center gap-3">
+            <Skeleton className="size-9 rounded-[10px]" />
+            <div className="flex flex-col gap-2">
+              <Skeleton className="h-3 rounded-md" width={width} />
+              <Skeleton className="h-2.5 rounded-md" width={240} />
+            </div>
+          </div>
+        ))}
+        <Skeleton className="h-11 w-full rounded-pill" />
+      </aside>
+    );
+  }
+
+  const { data, error } = current;
+  const risk = data?.risk;
+  const sample = data?.student.is_synthetic === true;
+  const factors = Object.entries(risk?.factors ?? {})
     .filter(([, f]) => (f.contribution ?? 0) > 0)
     .sort(([, a], [, b]) => (b.contribution ?? 0) - (a.contribution ?? 0));
 
   return (
-    <aside
-      aria-label={`${row.display_name} details`}
-      className="absolute inset-y-4 right-4 z-10 flex w-[400px] max-w-[calc(100%-32px)] flex-col gap-6 rounded-panel border border-border-subtle bg-surface-card px-6 pb-6 pt-5 shadow-panel short:inset-y-3 short:gap-4 short:pb-4 short:pt-4"
-    >
+    <aside aria-label={`${row.display_name} details`} className={PANEL}>
       <div className="flex flex-none items-start gap-[14px]">
         <Avatar name={row.display_name} size="lg" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -168,47 +228,58 @@ function StudentPanel({
         </button>
       </div>
 
-      <div className="-mx-6 flex min-h-0 flex-col gap-6 overflow-y-auto px-6 short:gap-4">
-        <div className="flex gap-2">
-          <Stat label="Credits done" value={row.credits_earned} />
-          <Stat label="In progress" value={row.credits_in_progress} />
-          <Stat hug label="Graduation" value={data ? (data.student.expected_graduation ?? "Not set") : "…"} />
-        </div>
+      {!data ? (
+        <StateMessage
+          kind="error"
+          className="min-h-0 flex-1"
+          action={
+            <Button full={false} onClick={onRetry}>
+              Try again
+            </Button>
+          }
+        >
+          We couldn&rsquo;t load {firstName}&rsquo;s risk score because {error}.
+        </StateMessage>
+      ) : !risk ? (
+        <StateMessage
+          kind="empty"
+          className="min-h-0 flex-1"
+          action={
+            <Button variant="secondary" full={false} onClick={onRetry}>
+              Check again
+            </Button>
+          }
+        >
+          {firstName} doesn&rsquo;t have a risk score yet.
+        </StateMessage>
+      ) : (
+        <>
+          <div className="-mx-6 flex min-h-0 flex-col gap-6 overflow-y-auto px-6 short:gap-4">
+            <div className="flex gap-2">
+              <Stat label="Credits done" value={row.credits_earned} />
+              <Stat label="In progress" value={row.credits_in_progress} />
+              <Stat hug label="Graduation" value={data.student.expected_graduation ?? "Not set"} />
+            </div>
 
-        {error ? (
-          <div role="alert" className="flex flex-col items-start gap-2 text-body-14 text-ink-primary">
-            <p>Could not load this student. {error}</p>
-            <TextButton onClick={onRetry}>Try again</TextButton>
-          </div>
-        ) : !data ? (
-          <p className="text-body-14 text-ink-secondary">Loading student…</p>
-        ) : (
-          <>
             <section className="flex flex-col gap-3">
               <SectionLabel sample={sample}>Student risk score</SectionLabel>
               <div className="flex flex-col gap-[10px] rounded-card border-[1.5px] border-ink-primary bg-surface-canvas px-[18px] pb-[18px] pt-4">
-                {data.risk ? (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <p className="flex items-end gap-1.5 whitespace-nowrap">
-                        <span className="text-display-44 text-ink-primary">{points(data.risk.risk_score)}</span>
-                        <span className="text-body-16 text-ink-secondary">/ 100</span>
-                      </p>
-                      <RiskChip level={data.risk.risk_level} detail="risk" />
-                    </div>
-                    <div className="h-[10px] overflow-clip rounded-pill border border-border-default bg-surface-sunken">
-                      <div className="h-full bg-ink-primary" style={{ width: `${points(data.risk.risk_score)}%` }} />
-                    </div>
-                    {/* Labels start where each level starts: low from 0, medium from 25, high from 50. */}
-                    <div className="grid grid-cols-4 text-caption-12-regular text-ink-secondary">
-                      <span>Low</span>
-                      <span>Medium</span>
-                      <span className="col-span-2">High</span>
-                    </div>
-                  </>
-                ) : (
-                  <p className="text-label-14 text-ink-primary">No risk score has been computed for this student yet.</p>
-                )}
+                <div className="flex items-center justify-between">
+                  <p className="flex items-end gap-1.5 whitespace-nowrap">
+                    <span className="text-display-44 text-ink-primary">{points(risk.risk_score)}</span>
+                    <span className="text-body-16 text-ink-secondary">/ 100</span>
+                  </p>
+                  <RiskChip level={risk.risk_level} detail="risk" />
+                </div>
+                <div className="h-[10px] overflow-clip rounded-pill border border-border-default bg-surface-sunken">
+                  <div className="h-full bg-ink-primary" style={{ width: `${points(risk.risk_score)}%` }} />
+                </div>
+                {/* Labels start where each level starts: low from 0, medium from 25, high from 50. */}
+                <div className="grid grid-cols-4 text-caption-12-regular text-ink-secondary">
+                  <span>Low</span>
+                  <span>Medium</span>
+                  <span className="col-span-2">High</span>
+                </div>
                 {data.flags.length > 0 && (
                   <ul className="flex flex-col gap-1.5 text-body-14 text-ink-primary">
                     {data.flags.map((flag) => (
@@ -222,54 +293,52 @@ function StudentPanel({
               </div>
             </section>
 
-            {data.risk && (
-              <section className="flex flex-col gap-3">
-                <SectionLabel sample={sample}>Contributing factors</SectionLabel>
-                {factors.length === 0 ? (
-                  <p className="text-body-14 text-ink-secondary">No factors are adding to this score.</p>
-                ) : (
-                  <ul className="flex flex-col">
-                    {factors.map(([key, factor], i) => {
-                      const f = describeFactor(key, factor);
-                      return (
-                        <li
-                          key={key}
-                          className={`flex items-center gap-3 py-3 ${i > 0 ? "border-t border-border-subtle" : ""}`}
-                        >
-                          <FactorIcon src={f.icon} />
-                          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                            <p className="text-label-14 text-ink-primary">{f.title}</p>
-                            <p className="text-caption-12-regular text-ink-secondary">{f.detail}</p>
-                          </div>
-                          <span className="flex-none text-caption-12 text-ink-secondary">
-                            +{points(factor.contribution ?? 0)}
-                          </span>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </section>
-            )}
-          </>
-        )}
-      </div>
+            <section className="flex flex-col gap-3">
+              <SectionLabel sample={sample}>Contributing factors</SectionLabel>
+              {factors.length === 0 ? (
+                <p className="text-body-14 text-ink-secondary">No factors are adding to this score.</p>
+              ) : (
+                <ul className="flex flex-col">
+                  {factors.map(([key, factor], i) => {
+                    const f = describeFactor(key, factor);
+                    return (
+                      <li
+                        key={key}
+                        className={`flex items-center gap-3 py-3 ${i > 0 ? "border-t border-border-subtle" : ""}`}
+                      >
+                        <FactorIcon src={f.icon} />
+                        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <p className="text-label-14 text-ink-primary">{f.title}</p>
+                          <p className="text-caption-12-regular text-ink-secondary">{f.detail}</p>
+                        </div>
+                        <span className="flex-none text-caption-12 text-ink-secondary">
+                          +{points(factor.contribution ?? 0)}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          </div>
 
-      <div className="flex flex-none flex-col items-center gap-2">
-        {row.plan_id ? (
-          <>
-            <ButtonLink href={`/plans/${row.plan_id}`} prefetch={false}>
-              View board
-            </ButtonLink>
-            <p className="flex items-center gap-1.5 text-caption-12-regular text-ink-secondary">
-              <Image src="/advisor/eye.svg" alt="" width={16} height={16} />
-              Opens {firstName}&rsquo;s canvas in read-only mode
-            </p>
-          </>
-        ) : (
-          <Button disabled>No plan yet</Button>
-        )}
-      </div>
+          <div className="flex flex-none flex-col items-center gap-2">
+            {row.plan_id ? (
+              <>
+                <ButtonLink href={`/plans/${row.plan_id}`} prefetch={false}>
+                  View board
+                </ButtonLink>
+                <p className="flex items-center gap-1.5 text-caption-12-regular text-ink-secondary">
+                  <Image src="/advisor/eye.svg" alt="" width={16} height={16} />
+                  Opens {firstName}&rsquo;s canvas in read-only mode
+                </p>
+              </>
+            ) : (
+              <Button disabled>No plan yet</Button>
+            )}
+          </div>
+        </>
+      )}
     </aside>
   );
 }
@@ -290,12 +359,12 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/caseload?advisorId=${advisor.id}`);
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status}).`);
+        const body = await getJson<{ students: CaseloadStudent[]; summary: { total: number } }>(
+          `/api/caseload?advisorId=${advisor.id}`,
+        );
         if (!cancelled) setCaseload({ status: "ready", students: body.students, total: body.summary.total });
       } catch (e) {
-        if (!cancelled) setCaseload({ status: "error", message: e instanceof Error ? e.message : "" });
+        if (!cancelled) setCaseload({ status: "error", reason: reasonOf(e) });
       }
     })();
     return () => {
@@ -312,18 +381,21 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedId]);
 
+  function reload() {
+    setCaseload({ status: "loading" });
+    setAttempt((n) => n + 1);
+  }
+
   async function openStudent(id: number) {
     setSelectedId(id);
     setDetail(null);
     requestedId.current = id;
     try {
-      const res = await fetch(`/api/students/${id}`);
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status}).`);
+      const data = await getJson<StudentDetail>(`/api/students/${id}`);
       // A slower response for a row the advisor has already left must not replace the current one.
-      if (requestedId.current === id) setDetail({ id, data: body });
+      if (requestedId.current === id) setDetail({ id, data });
     } catch (e) {
-      if (requestedId.current === id) setDetail({ id, error: e instanceof Error ? e.message : "" });
+      if (requestedId.current === id) setDetail({ id, error: reasonOf(e) });
     }
   }
 
@@ -353,6 +425,10 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
   const open = selected !== null;
   const highRisk = visible.filter((s) => s.risk_level === "high").length;
   const gap = open ? "gap-[14px]" : "gap-4";
+  // Slightly narrower beside the open panel, so the selected name and its tag fit at laptop widths.
+  const majorCol = `max-md:hidden ${open ? "w-[184px]" : "w-[200px]"}`;
+  // The column header shows above real rows and above the loading skeleton, not above a message.
+  const hasRows = caseload.status === "loading" || visible.length > 0;
 
   return (
     <main className="flex h-dvh min-h-[420px] flex-col bg-surface-canvas text-ink-primary">
@@ -373,17 +449,19 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
           <div className="flex flex-col gap-1">
             <h1 className="text-heading-28 whitespace-nowrap text-ink-primary">Your students</h1>
             <p className="text-body-14 text-ink-secondary">
-              {caseload.status === "ready"
-                ? `${
+              {caseload.status === "loading"
+                ? "Loading your students…"
+                : caseload.status === "error"
+                  ? "Couldn’t load students"
+                  : caseload.total === 0
+                    ? "0 students"
+                    : `${
                     visible.length === caseload.total
                       ? plural(caseload.total, "student")
                       : `${visible.length} of ${plural(caseload.total, "student")}`
                   } · ${highRisk} high risk${
-                    open ? "" : " · click a row to open that student’s board"
-                  }`
-                : caseload.status === "loading"
-                  ? "Loading your students…"
-                  : "Your students could not be loaded"}
+                        open ? "" : " · click a row to open that student’s board"
+                      }`}
             </p>
           </div>
 
@@ -421,40 +499,88 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-col rounded-[20px] border border-border-subtle bg-surface-card px-2 pb-2 pt-1.5 shadow-note">
-          <div className={`flex h-10 flex-none items-center px-[14px] ${gap}`}>
-            <span className={`min-w-0 flex-1 ${TH}`}>Student</span>
-            <span className={`w-[200px] max-md:hidden ${TH}`}>Major</span>
-            <span className={`w-[150px] max-sm:hidden ${TH}`}>Credits earned</span>
-            <span className={`w-[124px] ${TH} ${sort === "name" ? "" : "text-ink-primary"}`}>
-              Risk score{sort === "risk-desc" ? "  ↓" : sort === "risk-asc" ? "  ↑" : ""}
-            </span>
-            <span className="w-4" />
-          </div>
+        <div
+          aria-busy={caseload.status === "loading"}
+          className={`flex min-h-0 flex-col rounded-[20px] border border-border-subtle bg-surface-card px-2 pb-2 pt-1.5 shadow-note ${
+            hasRows ? "" : "min-h-[440px] justify-center short:min-h-0 short:flex-1"
+          }`}
+        >
+          {hasRows && (
+            <div className={`flex h-10 flex-none items-center px-[14px] ${gap}`}>
+              <span className={`min-w-0 flex-1 ${TH}`}>Student</span>
+              <span className={`${majorCol} ${TH}`}>Major</span>
+              <span className={`w-[150px] max-sm:hidden ${TH}`}>Credits earned</span>
+              <span className={`w-[124px] ${TH} ${sort === "name" ? "" : "text-ink-primary"}`}>
+                Risk score{sort === "risk-desc" ? "  ↓" : sort === "risk-asc" ? "  ↑" : ""}
+              </span>
+              <span className="w-4" />
+            </div>
+          )}
 
           {caseload.status === "loading" ? (
-            <p className="border-t border-border-subtle px-[14px] py-5 text-body-14 text-ink-secondary">
-              Loading students…
-            </p>
-          ) : caseload.status === "error" ? (
-            <div
-              role="alert"
-              className="flex flex-col items-start gap-2 border-t border-border-subtle px-[14px] py-5 text-body-14 text-ink-primary"
-            >
-              <p>Could not load your students. {caseload.message}</p>
-              <TextButton
-                onClick={() => {
-                  setCaseload({ status: "loading" });
-                  setAttempt((n) => n + 1);
-                }}
-              >
-                Try again
-              </TextButton>
+            <div className="min-h-0 overflow-hidden motion-safe:animate-pulse">
+              <span className="sr-only" role="status">
+                Loading your students…
+              </span>
+              {Array.from({ length: 10 }, (_, i) => (
+                <div key={i} className={`flex h-14 items-center border-t border-border-subtle px-[14px] ${gap}`}>
+                  <span className="flex min-w-0 flex-1 items-center gap-[10px]">
+                    <Skeleton className="size-8 rounded-pill" />
+                    <Skeleton className="h-3 rounded-md" width={[110, 134, 158][i % 3]} />
+                  </span>
+                  <span className={majorCol}>
+                    <Skeleton className="h-3 rounded-md" width={i % 2 ? 106 : 120} />
+                  </span>
+                  <span className="w-[150px] max-sm:hidden">
+                    <Skeleton className="h-3 rounded-md" width={i % 2 ? 56 : 70} />
+                  </span>
+                  <span className="w-[124px]">
+                    <Skeleton className="h-6 rounded-pill" width={88} />
+                  </span>
+                  <span className="w-4" />
+                </div>
+              ))}
             </div>
+          ) : caseload.status === "error" ? (
+            <StateMessage
+              kind="error"
+              action={
+                <Button full={false} onClick={reload}>
+                  Try again
+                </Button>
+              }
+            >
+              We couldn&rsquo;t load your students because {caseload.reason}.
+            </StateMessage>
+          ) : students.length === 0 ? (
+            <StateMessage
+              kind="empty"
+              action={
+                <Button variant="secondary" full={false} onClick={reload}>
+                  Refresh list
+                </Button>
+              }
+            >
+              No students are assigned to you yet.
+            </StateMessage>
           ) : visible.length === 0 ? (
-            <p className="border-t border-border-subtle px-[14px] py-5 text-body-14 text-ink-secondary">
-              {students.length === 0 ? "No students are assigned to you yet." : "No students match your search."}
-            </p>
+            <StateMessage
+              kind="empty"
+              action={
+                <Button
+                  variant="secondary"
+                  full={false}
+                  onClick={() => {
+                    setQuery("");
+                    setMajor("");
+                  }}
+                >
+                  Clear filters
+                </Button>
+              }
+            >
+              No students match your search or filter.
+            </StateMessage>
           ) : (
             <ul className="min-h-0 overflow-y-auto">
               {visible.map((s, i) => {
@@ -485,7 +611,7 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
                           <span className="truncate text-label-14 text-ink-primary">{s.display_name}</span>
                         )}
                       </span>
-                      <span className="w-[200px] truncate text-body-14 text-ink-secondary max-md:hidden">
+                      <span className={`${majorCol} truncate text-body-14 text-ink-secondary`}>
                         {s.program_name}
                       </span>
                       <span className="w-[150px] truncate text-body-14 text-ink-primary max-sm:hidden">
@@ -507,7 +633,7 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
           )}
         </div>
 
-        {caseload.status === "ready" && (
+        {caseload.status === "ready" && students.length > 0 && (
           <div className="flex flex-none flex-wrap items-center justify-between gap-2 px-2">
             <p className="text-caption-12-regular text-ink-secondary">
               Showing {visible.length} of {caseload.total}
