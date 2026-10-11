@@ -1,79 +1,20 @@
 import type { CourseState } from "@/components/CourseNode";
+import type { PlanIssue, PlanItem, PlanResponse, Prerequisite, StudentResponse } from "@/lib/planApi";
 
-// ---- API shapes (only the fields the board reads)
+// ---- Icons shared by the canvas and the side panel
 
-export type PlanIssue = { type: string; severity: "high" | "medium" | "low"; message: string };
-
-export type PlanItem = {
-  id: number;
-  courseId: number;
-  code: string;
-  title: string;
-  credits: number;
-  reason: string | null;
-  source: "ai" | "advisor";
-  section: {
-    section_code: string | null;
-    modality: string | null;
-    days: string[] | null;
-    start_time: string | null;
-    end_time: string | null;
-    capacity: number | null;
-    seats_open: number | null;
-    instructor: string | null;
-  } | null;
-  issues: PlanIssue[];
+export const STATE_ICON: Record<CourseState, string> = {
+  taken: "/login/icon-taken.svg",
+  "in-progress": "/login/icon-in-progress.svg",
+  available: "/login/icon-available.svg",
+  locked: "/login/icon-locked.svg",
+  suggested: "/plan/suggested.svg",
 };
 
-// GET /api/plans/:id
-export type PlanResponse = {
-  plan: {
-    id: number;
-    studentId: number;
-    studentName: string;
-    programName: string | null;
-    status: "draft" | "in_review" | "approved" | "archived";
-    createdBy: "ai" | "advisor";
-    modelName: string | null;
-    rationale: string | null;
-  };
-  term: { code: string; name: string };
-  items: PlanItem[];
-  totals: { credits: number; target: number; courses: number };
-  issues: PlanIssue[];
-};
-
-// GET /api/students/:id
-export type StudentResponse = {
-  student: { expected_graduation: string | null };
-  completed: {
-    code: string;
-    title: string;
-    credits: number;
-    grade: string | null;
-    term: string | null;
-    in_progress: boolean;
-  }[];
-  remaining: {
-    course_id: number;
-    code: string;
-    title: string;
-    credits: number;
-    category: string | null;
-    group_label: string | null;
-    critical_path: boolean;
-    depth: number;
-    eligible: boolean;
-  }[];
-};
-
-// GET /api/plans/:id/prerequisites
-export type Prerequisite = {
-  courseCode: string;
-  requiredCode: string;
-  kind: "prereq" | "coreq";
-  groupNo: number;
-  minGrade: string | null;
+export const BADGE_ICON = {
+  lock: "/plan/conflict-lock.svg",
+  clock: "/plan/conflict-clock.svg",
+  warning: "/advisor/risk-high.svg",
 };
 
 // ---- Board model
@@ -100,6 +41,10 @@ export type BoardCourse = {
   blocked?: boolean;
   grade?: string | null;
   where: "term" | "plan" | "unplanned";
+  courseId: number | null; // transcript rows carry no course id
+  // What dragging this note means: "add" it to the plan, "remove" it from the plan, or "locked"
+  // (it can be picked up, but the plan will not take it yet). null = not draggable.
+  drag: "add" | "remove" | "locked" | null;
   termLabel: string;
   criticalPath: boolean;
   fills: string | null;
@@ -156,7 +101,13 @@ function badgeFor(item: PlanItem): BoardCourse["badge"] {
   return { kind: "warning", text: humanize(issue.type) };
 }
 
-export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequisites: Prerequisite[]): Board {
+// `needs` maps a locked course id to what it is waiting on ("Needs COP 3502C"), when known.
+export function buildBoard(
+  plan: PlanResponse,
+  student: StudentResponse,
+  prerequisites: Prerequisite[],
+  needs: Map<number, string> = new Map(),
+): Board {
   const columns: BoardColumn[] = [];
   const courses: BoardCourse[] = [];
   const remainingById = new Map(student.remaining.map((r) => [r.course_id, r]));
@@ -196,6 +147,8 @@ export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequ
         state: c.in_progress ? "in-progress" : "taken",
         grade: c.grade,
         where: "term",
+        courseId: null,
+        drag: null,
         termLabel: term,
         criticalPath: false,
         fills: null,
@@ -229,6 +182,8 @@ export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequ
       status: notEligible ? needsText(notEligible, item.code).replace(/ first$/, "") : undefined,
       blocked: !!notEligible,
       where: "plan",
+      courseId: item.courseId,
+      drag: "remove",
       termLabel: plan.term.name,
       criticalPath: required?.critical_path ?? false,
       fills: fillsOf(required),
@@ -263,7 +218,10 @@ export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequ
           title: r.title,
           credits: r.credits,
           state,
+          status: state === "locked" ? needs.get(r.course_id) : undefined,
           where: "unplanned",
+          courseId: r.course_id,
+          drag: state === "available" ? "add" : "locked",
           termLabel: "Not yet planned",
           criticalPath: r.critical_path,
           fills: fillsOf(r),

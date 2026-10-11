@@ -1,695 +1,58 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Image from "next/image";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import {
-  BaseEdge,
-  Handle,
-  MarkerType,
-  Panel,
-  Position,
-  ReactFlow,
-  useReactFlow,
-  useViewport,
-  type Edge,
-  type EdgeProps,
-  type Node,
-  type NodeProps,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
+import { useRouter } from "next/navigation";
 import { TopBar } from "@/components/TopBar";
 import { Button, ButtonLink } from "@/components/Button";
 import { Avatar, Pill, PlanStatusChip } from "@/components/Chip";
-import { CourseNode, SuggestedTag, type CourseState } from "@/components/CourseNode";
 import { Skeleton, StateMessage } from "@/components/State";
-import { FetchError, getJson, reasonOf } from "@/lib/fetchJson";
-import type { Advisor } from "@/lib/useAdvisorSession";
+import { reasonOf } from "@/lib/fetchJson";
 import {
-  buildBoard,
-  COL_GAP,
-  ROW_GAP,
-  prerequisiteGroups,
-  unlockedBy,
-  HEADER_H,
-  NODE_H,
-  NODE_W,
-  type Board,
-  type BoardColumn,
-  type BoardCourse,
-  type BoardGroup,
-  type PlanResponse,
-  type Prerequisite,
-  type StudentResponse,
-} from "./board";
+  addCourse,
+  checkCourse,
+  explain,
+  generatePlan,
+  isMissing,
+  loadBoard,
+  removeCourse,
+  swapCourse,
+  type Alternative,
+  type PlanBoardData,
+} from "@/lib/planApi";
+import type { Advisor } from "@/lib/useAdvisorSession";
+import { BoardCanvas } from "./BoardCanvas";
+import { CoursePicker, FailedBanner, GenerateDialog, GeneratingBanner, RemoveDialog, Toast, type PickerCourse } from "./Dialogs";
+import { PlanPanel, PlanPanelSkeleton, type EditError } from "./PlanPanel";
+import { buildBoard, unlockedBy, NODE_W, type BoardCourse } from "./board";
 
 type Load =
   | { status: "loading" }
   | { status: "missing" }
   | { status: "error"; reason: string }
-  | { status: "ready"; plan: PlanResponse; student: StudentResponse; prerequisites: Prerequisite[] };
+  | { status: "ready"; data: PlanBoardData };
 
-const STATE_ICON: Record<CourseState, string> = {
-  taken: "/login/icon-taken.svg",
-  "in-progress": "/login/icon-in-progress.svg",
-  available: "/login/icon-available.svg",
-  locked: "/login/icon-locked.svg",
-  suggested: "/plan/suggested.svg",
-};
+type Dialog = null | { kind: "generate" } | { kind: "picker" } | { kind: "remove"; course: BoardCourse };
 
-const BADGE_ICON = {
-  lock: "/plan/conflict-lock.svg",
-  clock: "/plan/conflict-clock.svg",
-  warning: "/advisor/risk-high.svg",
-};
+type Generation = { status: "idle" } | { status: "running" } | { status: "failed"; message: string };
 
-const LABEL = "text-overline-12 uppercase whitespace-nowrap text-ink-secondary";
+// What a locked course is waiting on, from the API's own check.
+type Need = { text: string; sentence: string; codes: string[] };
 
-// ---------------------------------------------------------------- board nodes
+const COURSE_CODE = /[A-Z]{2,4} [A-Z0-9]{3,5}/g;
+const humanize = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
-type CourseData = {
-  course: BoardCourse;
-  selected: boolean;
-  dimmed: boolean;
-  onSelect: (id: string) => void;
-  onHover: (id: string | null) => void;
-};
-
-const HIDDEN_HANDLE = { opacity: 0, pointerEvents: "none" } as const;
-
-function CourseFlowNode({ data }: NodeProps<Node<CourseData>>) {
-  const { course, selected, dimmed, onSelect, onHover } = data;
-  return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={() => onSelect(course.id)}
-      onMouseEnter={() => onHover(course.id)}
-      onMouseLeave={() => onHover(null)}
-      onFocus={() => onHover(course.id)}
-      onBlur={() => onHover(null)}
-      className={`relative block cursor-pointer rounded-card text-left transition-opacity focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink-primary ${
-        dimmed ? "opacity-50" : ""
-      }`}
-    >
-      <Handle type="target" position={Position.Left} isConnectable={false} style={HIDDEN_HANDLE} />
-      <CourseNode
-        code={course.code}
-        title={course.title}
-        credits={`${course.credits} cr`}
-        state={course.state}
-        status={course.status}
-        blocked={course.blocked}
-        grade={course.grade}
-        selected={selected}
-      />
-      {course.badge && (
-        <span className="pointer-events-none absolute -inset-[3px] rounded-[18px] border-[2.5px] border-ink-primary" />
-      )}
-      {course.criticalPath && (
-        <span className="absolute -top-[11px] left-2">
-          <Pill tone="gold">Critical path</Pill>
-        </span>
-      )}
-      {course.badge && (
-        <span className="absolute -bottom-[14px] left-2 flex max-w-[196px] items-center gap-[5px] rounded-pill bg-ink-primary py-[3px] pl-[7px] pr-[10px] text-caption-12 text-surface-card">
-          <Image src={BADGE_ICON[course.badge.kind]} alt="" width={16} height={16} className="flex-none" />
-          <span className="truncate">{course.badge.text}</span>
-        </span>
-      )}
-      <Handle type="source" position={Position.Right} isConnectable={false} style={HIDDEN_HANDLE} />
-    </button>
-  );
-}
-
-function TermFlowNode({ data }: NodeProps<Node<{ column: BoardColumn }>>) {
-  const { column } = data;
-  return (
-    <div className="flex flex-col gap-0.5 pl-1" style={{ width: column.width }}>
-      <div className="flex h-6 items-center gap-2">
-        <h2 className="text-title-18 whitespace-nowrap text-ink-primary">{column.title}</h2>
-        {column.now && <Pill tone="gold">Now</Pill>}
-        {column.where === "plan" && (
-          <span className="rounded-pill border-[1.5px] border-ink-on-gold bg-brand-gold px-2 py-px text-caption-12 text-ink-on-gold">
-            Plan
-          </span>
-        )}
-      </div>
-      <p className="text-caption-12-regular whitespace-nowrap text-ink-muted">{column.sub}</p>
-    </div>
-  );
-}
-
-// Full-height band behind a term. Terms alternate between a faint tint and none, the plan's term
-// is faint gold, and "Not yet planned" is one wide dashed region.
-const BAND = {
-  plain: "",
-  tint: "bg-surface-sunken/60",
-  plan: "border border-brand-gold/40 bg-brand-gold-soft/45",
-  unplanned: "border-[1.5px] border-dashed border-border-default bg-surface-sunken/45",
-};
-
-function BandFlowNode({ data }: NodeProps<Node<{ look: keyof typeof BAND; width: number; height: number }>>) {
-  return <div className={`rounded-panel ${BAND[data.look]}`} style={{ width: data.width, height: data.height }} />;
-}
-
-function GroupFlowNode({ data }: NodeProps<Node<{ group: BoardGroup }>>) {
-  const { group } = data;
-  return (
-    <h3 className="flex items-center gap-1.5 pl-1 text-overline-12 uppercase whitespace-nowrap text-ink-secondary">
-      <Image src={STATE_ICON[group.state]} alt="" width={16} height={16} />
-      {group.label} · {group.count}
-    </h3>
-  );
-}
-
-function AddFlowNode() {
-  return (
-    <button
-      type="button"
-      disabled
-      style={{ width: NODE_W }}
-      className="cursor-not-allowed rounded-field border-[1.5px] border-dashed border-ink-muted py-2 text-caption-12 whitespace-pre text-ink-secondary opacity-60"
-    >
-      {"+  Add course"}
-    </button>
-  );
-}
-
-// Connector that stays in the gaps between notes: out of the source into the column gap beside it,
-// along the row gap above the target, then down the column gap in front of the target and in.
-function lanePath(sx: number, sy: number, tx: number, ty: number) {
-  const outX = sx + COL_GAP / 2;
-  const inX = tx - COL_GAP / 2;
-  const laneY = ty - NODE_H / 2 - ROW_GAP / 2;
-  const raw: [number, number][] =
-    outX === inX
-      ? [[sx, sy], [outX, sy], [outX, ty], [tx, ty]]
-      : [[sx, sy], [outX, sy], [outX, laneY], [inX, laneY], [inX, ty], [tx, ty]];
-  // Drop repeated points, then round each remaining corner.
-  const points = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1]);
-  let d = `M ${points[0][0]} ${points[0][1]}`;
-  for (let i = 1; i < points.length - 1; i++) {
-    const [px, py] = points[i - 1], [x, y] = points[i], [nx, ny] = points[i + 1];
-    const r = Math.min(10, Math.hypot(x - px, y - py) / 2, Math.hypot(nx - x, ny - y) / 2);
-    const ax = x - Math.sign(x - px) * r, ay = y - Math.sign(y - py) * r;
-    const bx = x + Math.sign(nx - x) * r, by = y + Math.sign(ny - y) * r;
-    d += ` L ${ax} ${ay} Q ${x} ${y} ${bx} ${by}`;
-  }
-  const last = points[points.length - 1];
-  return `${d} L ${last[0]} ${last[1]}`;
-}
-
-function LaneEdge({ sourceX, sourceY, targetX, targetY, style, markerEnd }: EdgeProps) {
-  return <BaseEdge path={lanePath(sourceX, sourceY, targetX, targetY)} style={style} markerEnd={markerEnd} />;
-}
-
-const EDGE_TYPES = { lane: LaneEdge };
-
-// Room around the fitted board. The legend and zoom control sit over the bottom edge.
-const FIT = { top: 28, side: 28, bottom: 88, minZoom: 0.5 };
-
-// Opening view: the term columns (transcript + this plan) fitted to the canvas. If that would
-// shrink the notes below half size, stay at half size and start from the top-left instead, so the
-// board opens readable and the rest is a pan away. "Not yet planned" continues to the right.
-function openingViewport(board: Board, width: number, height: number) {
-  const terms = board.columns.filter((column) => column.where !== "unplanned");
-  const right = Math.max(...terms.map((column) => column.x + column.width));
-  const bottom = Math.max(HEADER_H, ...board.courses.filter((c) => c.where !== "unplanned").map((c) => c.y + NODE_H));
-  const fit = Math.min((width - FIT.side * 2) / right, (height - FIT.top - FIT.bottom) / bottom);
-  const zoom = Math.min(1, Math.max(FIT.minZoom, fit));
-  return { x: FIT.side, y: FIT.top, zoom };
-}
-
-const NODE_TYPES = { course: CourseFlowNode, term: TermFlowNode, add: AddFlowNode, band: BandFlowNode, heading: GroupFlowNode };
-
-// How far a band reaches beyond its column: half the gap to each side, a little above and below.
-const BAND_PAD = { x: COL_GAP / 2 - 6, top: 16, bottom: 24 };
-
-// ---------------------------------------------------------------- canvas overlays
-
-const OVERLAY =
-  "flex items-center rounded-card border border-border-subtle bg-surface-card px-4 py-[10px] shadow-note";
-
-function Legend() {
-  const entries: [CourseState, string][] = [
-    ["taken", "Taken"],
-    ["in-progress", "In progress"],
-    ["available", "Available now"],
-    ["locked", "Locked"],
-    ["suggested", "Suggested"],
-  ];
-  return (
-    <Panel position="bottom-left" style={{ margin: 24, maxWidth: "calc(100% - 210px)" }}>
-      <ul className={`${OVERLAY} flex-wrap gap-x-[18px] gap-y-2`}>
-        {entries.map(([state, label]) => (
-          <li key={state} className="flex items-center gap-1.5 text-caption-12 whitespace-nowrap text-ink-secondary">
-            <Image src={STATE_ICON[state]} alt="" width={18} height={18} />
-            {label}
-          </li>
-        ))}
-        <li className="flex items-center gap-1.5 text-caption-12 whitespace-nowrap text-ink-secondary max-xl:hidden">
-          <span className="h-[3.5px] w-6 rounded-pill bg-brand-gold" />
-          Prerequisite, on hover or select
-        </li>
-      </ul>
-    </Panel>
-  );
-}
-
-function ZoomControl() {
-  const { zoomIn, zoomOut } = useReactFlow();
-  const { zoom } = useViewport();
-  const step = "cursor-pointer px-1 text-label-16 text-ink-secondary hover:text-ink-primary";
-  return (
-    <Panel position="bottom-right" style={{ margin: 24 }}>
-      <div className={`${OVERLAY} gap-[14px]`}>
-        <button type="button" aria-label="Zoom out" className={step} onClick={() => zoomOut({ duration: 150 })}>
-          −
-        </button>
-        <span className="min-w-9 text-center text-caption-12 text-ink-primary">{Math.round(zoom * 100)}%</span>
-        <button type="button" aria-label="Zoom in" className={step} onClick={() => zoomIn({ duration: 150 })}>
-          +
-        </button>
-      </div>
-    </Panel>
-  );
-}
-
-// ---------------------------------------------------------------- side panel
-
-function CourseRef({ code, board }: { code: string; board: Board }) {
-  // A course can be on the board twice (a failed attempt and its retake): describe the latest.
-  const course = board.courses.filter((c) => c.code === code).at(-1);
-  const status = !course
-    ? "Not on this board"
-    : course.state === "taken"
-      ? "Taken"
-      : course.state === "in-progress"
-        ? "In progress"
-        : course.where === "plan"
-          ? "In this plan"
-          : "Not yet planned";
-  return (
-    <li className="flex items-center gap-2 py-[7px]">
-      {course && <Image src={STATE_ICON[course.state]} alt="" width={18} height={18} className="flex-none" />}
-      <span className="flex-none text-label-14 text-ink-primary">{code}</span>
-      <span className="min-w-0 flex-1 truncate text-body-14 text-ink-secondary">{course?.title}</span>
-      {course?.grade ? (
-        <span className="flex-none rounded-pill bg-ink-primary px-[9px] py-0.5 text-caption-12 text-surface-card">
-          {course.grade}
-        </span>
-      ) : (
-        <span className="flex-none text-caption-12-regular text-ink-secondary">{status}</span>
-      )}
-    </li>
-  );
-}
-
-const time = (t: string | null) => t?.slice(0, 5) ?? "";
-
-function SelectedCourse({
-  course,
-  board,
-  prerequisites,
-  onClose,
+function Shell({
+  advisor,
+  left,
+  generate,
+  children,
 }: {
-  course: BoardCourse;
-  board: Board;
-  prerequisites: Prerequisite[];
-  onClose: () => void;
+  advisor: Advisor;
+  left?: React.ReactNode;
+  generate?: { label: string; disabled: boolean; onClick: () => void };
+  children: React.ReactNode;
 }) {
-  const groups = prerequisiteGroups(course.code, prerequisites);
-  const unlocks = unlockedBy(course.code, prerequisites);
-  const section = course.item?.section;
-
-  return (
-    <section
-      aria-label={`${course.code} details`}
-      className="flex flex-none flex-col gap-3 rounded-card border-[1.5px] border-ink-primary bg-surface-canvas px-4 py-[14px]"
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
-          <h2 className="text-title-18 whitespace-nowrap text-ink-primary">{course.code}</h2>
-          {course.state === "suggested" && <SuggestedTag />}
-          {course.criticalPath && <Pill tone="gold">Critical path</Pill>}
-        </div>
-        <div className="flex flex-none items-center">
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close course details"
-            className="cursor-pointer rounded-pill focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary"
-          >
-            <Image src="/advisor/close.svg" alt="" width={28} height={28} />
-          </button>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-0.5">
-        <p className="text-body-14 text-ink-primary">
-          {course.title} · {course.termLabel} · {course.credits} cr
-        </p>
-        {course.fills && <p className="text-caption-12-regular text-ink-secondary">Fills: {course.fills}</p>}
-      </div>
-
-      {course.item && (
-        <div className="flex flex-wrap gap-2">
-          <Button variant="gold" size="sm" full={false} disabled>
-            Confirm
-          </Button>
-          <Button variant="secondary" size="sm" full={false} disabled>
-            Swap
-          </Button>
-          <Button variant="secondary" size="sm" full={false} disabled>
-            Remove
-          </Button>
-        </div>
-      )}
-
-      {course.item?.reason && (
-        <div className="flex flex-col gap-1">
-          <h3 className={LABEL}>Why this course</h3>
-          <p className="text-body-14 text-ink-primary">{course.item.reason}</p>
-        </div>
-      )}
-
-      {section && (
-        <div className="flex flex-col gap-1">
-          <h3 className={LABEL}>Section</h3>
-          <p className="text-body-14 text-ink-primary">
-            {[
-              section.section_code && `Section ${section.section_code}`,
-              section.days?.length ? `${section.days.join(" ")} ${time(section.start_time)}–${time(section.end_time)}` : null,
-              section.modality,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-          <p className="text-caption-12-regular text-ink-secondary">
-            {[
-              section.instructor && `Instructor: ${section.instructor}`,
-              section.seats_open !== null &&
-                section.capacity !== null &&
-                `${section.seats_open} of ${section.capacity} seats open`,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-        </div>
-      )}
-
-      {course.item && course.item.issues.length > 0 && (
-        <div className="flex flex-col gap-1">
-          <h3 className={LABEL}>Issues</h3>
-          <ul className="flex flex-col gap-1 text-body-14 text-ink-primary">
-            {course.item.issues.map((issue, i) => (
-              <li key={i}>{issue.message}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="flex flex-col">
-        <div className="flex items-center justify-between pb-1">
-          <h3 className={LABEL}>Prerequisites</h3>
-        </div>
-        {groups.length === 0 ? (
-          <p className="text-body-14 text-ink-secondary">None listed.</p>
-        ) : (
-          groups.map((group, i) => (
-            <div key={i} className="border-t border-border-subtle">
-              {(group.codes.length > 1 || group.kind === "coreq") && (
-                <p className="pt-[7px] text-caption-12-regular text-ink-secondary">
-                  {group.kind === "coreq" ? "Corequisite" : "One of"}
-                </p>
-              )}
-              <ul>
-                {group.codes.map((code) => (
-                  <CourseRef key={code} code={code} board={board} />
-                ))}
-              </ul>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <h3 className={LABEL}>Unlocks</h3>
-          {unlocks.length > 0 && (
-            <span className="text-caption-12-regular text-ink-secondary">
-              {unlocks.length} {unlocks.length === 1 ? "course" : "courses"}
-            </span>
-          )}
-        </div>
-        {unlocks.length === 0 ? (
-          <p className="text-body-14 text-ink-secondary">Nothing listed.</p>
-        ) : (
-          <ul className="flex flex-wrap gap-1.5">
-            {unlocks.map((code) => (
-              <li
-                key={code}
-                className="rounded-pill border-[1.5px] border-border-default bg-surface-card px-[10px] py-[3px] text-caption-12 text-ink-primary"
-              >
-                {code}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function PlanPanel({
-  plan,
-  board,
-  prerequisites,
-  selected,
-  onSelect,
-}: {
-  plan: PlanResponse;
-  board: Board;
-  prerequisites: Prerequisite[];
-  selected: BoardCourse | null;
-  onSelect: (id: string | null) => void;
-}) {
-  const { credits, target, courses } = plan.totals;
-  const planned = board.courses.filter((c) => c.where === "plan");
-
-  return (
-    <aside
-      aria-label="Plan details"
-      className="my-3 mr-4 flex w-[368px] flex-none flex-col gap-[22px] overflow-y-auto rounded-panel border border-border-subtle bg-surface-card p-5 shadow-panel short:gap-4 short:p-4 max-md:hidden"
-    >
-      {selected && (
-        <SelectedCourse course={selected} board={board} prerequisites={prerequisites} onClose={() => onSelect(null)} />
-      )}
-
-      <section className="flex flex-none flex-col gap-[10px]">
-        <h2 className={LABEL}>Why this plan</h2>
-        <p className="text-body-14 text-ink-primary">{plan.plan.rationale ?? "No rationale was recorded for this plan."}</p>
-        <p className="text-caption-12-regular text-ink-secondary">
-          {plan.plan.createdBy === "ai" ? "Drafted by AI" : "Created by an advisor"}
-          {plan.plan.modelName ? ` · ${plan.plan.modelName}` : ""}
-        </p>
-      </section>
-
-      <section className="flex flex-none flex-col gap-[10px]">
-        <h2 className={LABEL}>Credits per term</h2>
-        <div className="flex items-center gap-[10px]">
-          <span className="w-[92px] flex-none text-body-14 text-ink-primary">{plan.term.name}</span>
-          <span className="h-2 min-w-0 flex-1 overflow-clip rounded-pill border border-border-default bg-surface-sunken">
-            <span
-              className="block h-full bg-ink-primary"
-              style={{ width: `${target > 0 ? Math.min(100, (credits / target) * 100) : 0}%` }}
-            />
-          </span>
-          <span className="flex-none text-label-14 whitespace-nowrap text-ink-primary">{credits} cr</span>
-        </div>
-        <p className="text-caption-12-regular text-ink-secondary">Target: {target} cr</p>
-        {plan.issues.length > 0 && (
-          <ul className="flex flex-col gap-1 text-body-14 text-ink-primary">
-            {plan.issues.map((issue, i) => (
-              <li key={i}>{issue.message}</li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="flex flex-none flex-col gap-[10px]">
-        <div className="flex items-center justify-between">
-          <h2 className={LABEL}>Courses in this plan</h2>
-          <span className="text-caption-12-regular whitespace-nowrap text-ink-secondary">
-            {courses} {courses === 1 ? "course" : "courses"} · {credits} cr
-          </span>
-        </div>
-        {planned.length === 0 ? (
-          <p className="text-body-14 text-ink-secondary">This plan has no courses yet.</p>
-        ) : (
-          <ul className="flex flex-wrap gap-1.5">
-            {planned.map((c) => (
-              <li key={c.id}>
-                <button
-                  type="button"
-                  aria-pressed={selected?.id === c.id}
-                  onClick={() => onSelect(c.id)}
-                  className={`flex cursor-pointer items-center gap-[5px] rounded-pill border-[1.5px] py-[3px] pr-[10px] text-caption-12 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary ${
-                    c.badge
-                      ? "border-ink-primary bg-ink-primary pl-[7px] text-surface-card"
-                      : c.state === "suggested"
-                        ? "border-brand-gold bg-brand-gold-soft pl-[7px] text-ink-primary"
-                        : "border-border-default bg-surface-card pl-[10px] text-ink-primary"
-                  }`}
-                >
-                  {c.badge ? (
-                    <Image src={BADGE_ICON[c.badge.kind]} alt="" width={16} height={16} />
-                  ) : (
-                    c.state === "suggested" && <Image src="/plan/suggested.svg" alt="" width={16} height={16} />
-                  )}
-                  {c.code}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </aside>
-  );
-}
-
-// ---------------------------------------------------------------- page
-
-function BoardCanvas({
-  board,
-  selectedId,
-  onSelect,
-}: {
-  board: Board;
-  selectedId: string | null;
-  onSelect: (id: string | null) => void;
-}) {
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-
-  const nodes = useMemo(() => {
-    const linked = board.edges.filter((e) => e.source === selectedId || e.target === selectedId);
-    const related = new Set(linked.flatMap((e) => [e.source, e.target]));
-    const backdrop = { selectable: false, focusable: false, style: { pointerEvents: "none" as const } };
-    let terms = 0;
-
-    const nodes: Node[] = [
-      ...board.columns.map((column) => ({
-        ...backdrop,
-        id: `band:${column.id}`,
-        type: "band",
-        zIndex: -1,
-        position: { x: column.x - BAND_PAD.x, y: -BAND_PAD.top },
-        data: {
-          look: column.where === "term" ? (terms++ % 2 === 0 ? "tint" : "plain") : column.where,
-          width: column.width + BAND_PAD.x * 2,
-          height: board.bottom + BAND_PAD.top + BAND_PAD.bottom,
-        },
-      })),
-      ...board.columns.map((column) => ({
-        ...backdrop,
-        id: column.id,
-        type: "term",
-        position: { x: column.x, y: 0 },
-        width: column.width,
-        height: HEADER_H,
-        data: { column },
-      })),
-      ...board.columns.flatMap((column) =>
-        (column.groups ?? []).map((group) => ({
-          ...backdrop,
-          id: `group:${group.state}`,
-          // Not "group": React Flow reserves that type name and draws a box around it.
-          type: "heading",
-          // In the gap between the region header and the first row of notes.
-          position: { x: group.x, y: HEADER_H + 8 },
-          data: { group },
-        })),
-      ),
-      ...board.columns
-        .filter((column) => column.addY !== undefined)
-        .map((column) => ({
-          id: `add:${column.id}`,
-          type: "add",
-          position: { x: column.x, y: column.addY! },
-          data: {},
-          selectable: false,
-        })),
-      ...board.courses.map((course) => ({
-        id: course.id,
-        type: "course",
-        position: { x: course.x, y: course.y },
-        width: NODE_W,
-        height: NODE_H,
-        data: {
-          course,
-          selected: course.id === selectedId,
-          dimmed: selectedId !== null && course.id !== selectedId && !related.has(course.id),
-          onSelect,
-          onHover: setHoveredId,
-        },
-      })),
-    ];
-    return nodes;
-  }, [board, selectedId, onSelect]);
-
-  // Connectors stay hidden until a course is hovered, focused or selected. Then that course's
-  // prerequisite and unlock connectors show in gold, with an arrowhead at the course that needs
-  // the other.
-  const edges = useMemo(
-    (): Edge[] =>
-      board.edges.map((e) => ({
-        ...e,
-        type: "lane",
-        focusable: false,
-        selectable: false,
-        hidden: ![e.source, e.target].some((id) => id === selectedId || id === hoveredId),
-        zIndex: 1,
-        style: { stroke: "var(--color-brand-gold)", strokeWidth: 3.5 },
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          color: "var(--color-brand-gold)",
-          markerUnits: "userSpaceOnUse",
-          width: 18,
-          height: 18,
-        },
-      })),
-    [board, selectedId, hoveredId],
-  );
-
-  return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      nodeTypes={NODE_TYPES}
-      edgeTypes={EDGE_TYPES}
-      nodesDraggable={false}
-      nodesConnectable={false}
-      nodesFocusable={false}
-      edgesFocusable={false}
-      elementsSelectable={false}
-      zoomOnDoubleClick={false}
-      minZoom={0.2}
-      maxZoom={1.5}
-      onInit={(flow) => {
-        const pane = document.querySelector<HTMLElement>(".react-flow");
-        if (pane) flow.setViewport(openingViewport(board, pane.clientWidth, pane.clientHeight));
-      }}
-      attributionPosition="bottom-center"
-      onPaneClick={() => onSelect(null)}
-    >
-      <Legend />
-      <ZoomControl />
-    </ReactFlow>
-  );
-}
-
-function Shell({ advisor, left, children }: { advisor: Advisor; left?: React.ReactNode; children: React.ReactNode }) {
   return (
     <main className="flex h-dvh min-h-[420px] flex-col bg-surface-canvas text-ink-primary">
       <TopBar
@@ -707,9 +70,17 @@ function Shell({ advisor, left, children }: { advisor: Advisor; left?: React.Rea
           </>
         }
       >
-        <Button variant="secondary" size="sm" full={false} disabled className="max-lg:hidden">
-          Generate draft plan
+        <Button
+          variant="secondary"
+          size="sm"
+          full={false}
+          disabled={!generate || generate.disabled}
+          onClick={generate?.onClick}
+          className="max-lg:hidden"
+        >
+          {generate?.label ?? "Generate draft plan"}
         </Button>
+        {/* Approval and overrides come in the next pass. */}
         <Button size="sm" full={false} disabled className="max-lg:hidden">
           Approve plan
         </Button>
@@ -721,27 +92,32 @@ function Shell({ advisor, left, children }: { advisor: Advisor; left?: React.Rea
 }
 
 export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advisor }) {
+  const router = useRouter();
   const validId = /^[1-9]\d*$/.test(planId);
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Editing state. `busy` is true while any request that changes the plan is in flight.
+  const [busy, setBusy] = useState(false);
+  const [dialog, setDialog] = useState<Dialog>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [editError, setEditError] = useState<EditError | null>(null);
+  const [noteErrors, setNoteErrors] = useState<Record<string, string>>({});
+  const [pickerError, setPickerError] = useState<{ courseId: number; message: string } | null>(null);
+  const [pickerBusyId, setPickerBusyId] = useState<number | null>(null);
+  const [generation, setGeneration] = useState<Generation>({ status: "idle" });
+  const [needs, setNeeds] = useState<Map<number, Need>>(new Map());
 
   useEffect(() => {
     if (!validId) return;
     let cancelled = false;
     (async () => {
       try {
-        const plan = await getJson<PlanResponse>(`/api/plans/${planId}`);
-        const [student, edges] = await Promise.all([
-          getJson<StudentResponse>(`/api/students/${plan.plan.studentId}`),
-          getJson<{ prerequisites: Prerequisite[] }>(`/api/plans/${planId}/prerequisites`),
-        ]);
-        if (!cancelled) setLoad({ status: "ready", plan, student, prerequisites: edges.prerequisites });
+        const data = await loadBoard(planId);
+        if (!cancelled) setLoad({ status: "ready", data });
       } catch (e) {
-        if (cancelled) return;
-        setLoad(
-          e instanceof FetchError && e.status === 404 ? { status: "missing" } : { status: "error", reason: reasonOf(e) },
-        );
+        if (!cancelled) setLoad(isMissing(e) ? { status: "missing" } : { status: "error", reason: reasonOf(e) });
       }
     })();
     return () => {
@@ -749,10 +125,64 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
     };
   }, [planId, validId, attempt]);
 
-  const board = useMemo(
-    () => (load.status === "ready" ? buildBoard(load.plan, load.student, load.prerequisites) : null),
-    [load],
-  );
+  // Ask the API why each locked course is locked. That depends on the student's transcript, not on
+  // the plan, so it is fetched once and reused for notes, drag tooltips and the course picker.
+  const lockedKey =
+    load.status === "ready"
+      ? load.data.student.remaining
+          .filter((r) => !r.eligible)
+          .map((r) => r.course_id)
+          .join(",")
+      : "";
+  useEffect(() => {
+    if (!lockedKey) return;
+    let cancelled = false;
+    (async () => {
+      const checks = await Promise.all(
+        lockedKey.split(",").map(async (id) => {
+          try {
+            return [Number(id), await checkCourse(Number(planId), Number(id))] as const;
+          } catch {
+            return null; // the note just says "Locked"
+          }
+        }),
+      );
+      if (cancelled) return;
+      const found = new Map<number, Need>();
+      for (const entry of checks) {
+        if (!entry || entry[1].missing.length === 0) continue;
+        const what = entry[1].missing.join(" and ");
+        const issue = entry[1].problems.find((p) => p.type === "not_eligible");
+        found.set(entry[0], {
+          text: `Needs ${what}`,
+          sentence: issue?.message ?? `It needs ${what} first.`,
+          codes: what.match(COURSE_CODE) ?? [],
+        });
+      }
+      setNeeds(found);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [lockedKey, planId]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const board = useMemo(() => {
+    if (load.status !== "ready") return null;
+    const labels = new Map([...needs].map(([id, need]) => [id, need.text]));
+    return buildBoard(load.data.plan, load.data.student, load.data.prerequisites, labels);
+  }, [load, needs]);
+
+  const blockers = useCallback((course: BoardCourse) => needs.get(course.courseId ?? -1)?.codes ?? [], [needs]);
+  const openPicker = useCallback(() => {
+    setPickerError(null);
+    setDialog({ kind: "picker" });
+  }, []);
 
   if (!validId || load.status === "missing") {
     return (
@@ -819,12 +249,139 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
     );
   }
 
-  const { plan, student, prerequisites } = load;
+  const { plan, student, prerequisites } = load.data;
+  const numericId = plan.plan.id;
+  const termName = plan.term.name;
+  const firstName = plan.plan.studentName.trim().split(/\s+/)[0];
   const selected = board.courses.find((c) => c.id === selectedId) ?? null;
+  const generating = generation.status === "running";
+
+  // ---- changing the plan
+
+  // Runs one change, then reloads the board from the API so totals and the summary are current.
+  // Returns the plain-language reason if the API refused the change, or null if it went through.
+  async function change(action: () => Promise<unknown>): Promise<string | null> {
+    setBusy(true);
+    setEditError(null);
+    setNoteErrors({});
+    try {
+      await action();
+    } catch (e) {
+      setBusy(false);
+      return explain(e);
+    }
+    try {
+      setLoad({ status: "ready", data: await loadBoard(numericId) });
+    } catch (e) {
+      // The change was saved but the board could not be re-read: show the load error with a retry.
+      setLoad({ status: "error", reason: reasonOf(e) });
+    }
+    setBusy(false);
+    return null;
+  }
+
+  function refused(course: BoardCourse, title: string, message: string) {
+    setNoteErrors({ [course.id]: message });
+    setEditError({ title, message });
+  }
+
+  async function addFromBoard(course: BoardCourse) {
+    if (course.courseId === null) return;
+    const reason = await change(() => addCourse(numericId, course.courseId!, advisor.id));
+    if (reason) return refused(course, `Can’t add ${course.code} to ${termName}`, reason);
+    setToast(`${course.code} added to ${termName}`);
+    setSelectedId(`plan:${course.code}`);
+  }
+
+  async function addFromPicker(course: PickerCourse) {
+    setPickerError(null);
+    setPickerBusyId(course.courseId);
+    const reason = await change(() => addCourse(numericId, course.courseId, advisor.id));
+    setPickerBusyId(null);
+    if (reason) return setPickerError({ courseId: course.courseId, message: reason });
+    setDialog(null);
+    setToast(`${course.code} added to ${termName}`);
+    setSelectedId(`plan:${course.code}`);
+  }
+
+  function dropLocked(course: BoardCourse) {
+    const need = needs.get(course.courseId ?? -1);
+    refused(
+      course,
+      `Can’t add ${course.code} to ${termName} yet`,
+      need?.sentence ?? `${course.code} has prerequisites that are not finished yet.`,
+    );
+  }
+
+  async function confirmRemove(course: BoardCourse) {
+    if (!course.item) return;
+    const reason = await change(() => removeCourse(numericId, course.item!.id, advisor.id));
+    setDialog(null);
+    if (reason) return refused(course, `Can’t remove ${course.code}`, reason);
+    setToast(`${course.code} removed from ${termName}`);
+    if (selectedId === course.id) setSelectedId(null);
+  }
+
+  async function swap(course: BoardCourse, alternative: Alternative) {
+    if (!course.item) return;
+    const reason = await change(() => swapCourse(numericId, course.item!.id, alternative.courseId, advisor.id));
+    if (reason) return refused(course, `Can’t swap ${course.code} for ${alternative.code}`, reason);
+    setToast(`${alternative.code} swapped in for ${course.code}`);
+    setSelectedId(`plan:${alternative.code}`);
+  }
+
+  async function generate() {
+    setDialog(null);
+    setBusy(true);
+    setEditError(null);
+    setNoteErrors({});
+    setGeneration({ status: "running" });
+    try {
+      const created = await generatePlan(plan.plan.studentId, advisor.id);
+      // A new draft is a new plan with its own id. `busy` stays on until that page takes over.
+      router.replace(`/plans/${created.plan.id}${window.location.search}`);
+    } catch (e) {
+      const reason = explain(e);
+      const unsure = reason.includes("too long") || reason.includes("connection");
+      setGeneration({
+        status: "failed",
+        message: unsure
+          ? `${reason} The planner may still finish, so reload in a moment to check.`
+          : `${reason} Nothing on the board changed.`,
+      });
+      setBusy(false);
+    }
+  }
+
+  // ---- derived for the dialogs
+
+  const plannedIds = new Set(plan.items.map((item) => item.courseId));
+  const rank = { eligible: 0, locked: 1, planned: 2 };
+  const pickerCourses: PickerCourse[] = student.remaining
+    .map((r) => ({
+      courseId: r.course_id,
+      code: r.code,
+      title: r.title,
+      group: humanize(r.group_label ?? r.category ?? "Other"),
+      pick: r.pick_count,
+      state: plannedIds.has(r.course_id) ? ("planned" as const) : r.eligible ? ("eligible" as const) : ("locked" as const),
+      needs: needs.get(r.course_id)?.text ?? null,
+    }))
+    .sort((a, b) => rank[a.state] - rank[b.state]);
+
+  const affectedBy = (course: BoardCourse) => {
+    const dependents = new Set(unlockedBy(course.code, prerequisites));
+    return plan.items.filter((item) => dependents.has(item.code)).map((item) => ({ code: item.code, title: item.title }));
+  };
 
   return (
     <Shell
       advisor={advisor}
+      generate={{
+        label: generating ? "Generating…" : "Generate draft plan",
+        disabled: busy,
+        onClick: () => setDialog({ kind: "generate" }),
+      }}
       left={
         <>
           <span className="h-7 w-[1.5px] flex-none bg-border-subtle" />
@@ -841,10 +398,85 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
         </>
       }
     >
-      <div className="relative min-w-0 flex-1">
-        <BoardCanvas board={board} selectedId={selectedId} onSelect={setSelectedId} />
+      <div className="relative min-w-0 flex-1" aria-busy={busy}>
+        <BoardCanvas
+          board={board}
+          planTerm={termName}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          locked={busy}
+          noteErrors={noteErrors}
+          blockers={blockers}
+          onAdd={openPicker}
+          onDropAdd={addFromBoard}
+          onDropRemove={(course) => setDialog({ kind: "remove", course })}
+          onDropLocked={dropLocked}
+        />
+        {generating ? (
+          <GeneratingBanner />
+        ) : generation.status === "failed" ? (
+          <FailedBanner
+            message={generation.message}
+            onRetry={generate}
+            onDismiss={() => setGeneration({ status: "idle" })}
+          />
+        ) : (
+          toast && <Toast message={toast} />
+        )}
       </div>
-      <PlanPanel plan={plan} board={board} prerequisites={prerequisites} selected={selected} onSelect={setSelectedId} />
+
+      {generating ? (
+        <PlanPanelSkeleton />
+      ) : (
+        <PlanPanel
+          plan={plan}
+          board={board}
+          prerequisites={prerequisites}
+          selected={selected}
+          busy={busy}
+          editError={editError}
+          onDismissError={() => {
+            setEditError(null);
+            setNoteErrors({});
+          }}
+          onSelect={setSelectedId}
+          onAdd={addFromBoard}
+          onSwap={swap}
+          onRemove={(course) => setDialog({ kind: "remove", course })}
+        />
+      )}
+
+      {dialog?.kind === "generate" && (
+        <GenerateDialog
+          firstName={firstName}
+          status={plan.plan.status}
+          updatedAt={plan.plan.updatedAt}
+          courses={plan.totals.courses}
+          termName={termName}
+          onKeep={() => setDialog(null)}
+          onGenerate={generate}
+        />
+      )}
+      {dialog?.kind === "remove" && (
+        <RemoveDialog
+          code={dialog.course.code}
+          termName={termName}
+          affected={affectedBy(dialog.course)}
+          busy={busy}
+          onCancel={() => setDialog(null)}
+          onRemove={() => confirmRemove(dialog.course)}
+        />
+      )}
+      {dialog?.kind === "picker" && (
+        <CoursePicker
+          termName={termName}
+          courses={pickerCourses}
+          busyId={pickerBusyId}
+          error={pickerError}
+          onAdd={addFromPicker}
+          onClose={() => setDialog(null)}
+        />
+      )}
     </Shell>
   );
 }

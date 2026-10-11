@@ -54,6 +54,7 @@
   --shadow-note: 0 1px 2px 0 #1a170d0f, 0 4px 10px 0 #1a170d12;
   --shadow-note-lifted: 0 2px 4px 0 #1a170d0f, 0 10px 22px 0 #1a170d1f;
   --shadow-panel: 0 2px 6px 0 #1a170d0f, 0 16px 40px 0 #1a170d24;
+  --shadow-dragging: 0 4px 8px 0 #1a170d1a, 0 22px 44px 0 #1a170d3d;
 
   /* Figma text styles (all Nunito). */
   --text-display-44: 44px;
