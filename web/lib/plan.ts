@@ -24,7 +24,8 @@ export type Issue = {
     | "credits_over"
     | "credits_under"
     | "not_in_program"
-    | "term_not_open";
+    | "term_not_open"
+    | "breaks_dependent";
   severity: "high" | "medium" | "low";
   message: string;
   courseId?: number;
@@ -434,7 +435,7 @@ export async function getPlan(planId: number) {
 // ---------------------------------------------------------------- checking an edit
 
 // Can this course go into `termCode` (default: the next term), optionally replacing one item?
-export async function checkAddition(planId: number, courseId: number, opts: { replaceItemId?: number; termCode?: string; ignoreSeats?: boolean } = {}) {
+export async function checkAddition(planId: number, courseId: number, opts: { replaceItemId?: number; termCode?: string; ignoreSeats?: boolean; moving?: boolean } = {}) {
   const [plan] = (await sql`SELECT student_id FROM plans WHERE id = ${planId}`) as any[];
   if (!plan) throw new ApiError("plan_not_found", "Plan not found", 404);
   return checkAdditionFor(plan.student_id, planId, courseId, opts);
@@ -446,7 +447,7 @@ export async function checkAdditionFor(
   studentId: number,
   planId: number | null,
   courseId: number,
-  opts: { replaceItemId?: number; termCode?: string; ignoreSeats?: boolean } = {}
+  opts: { replaceItemId?: number; termCode?: string; ignoreSeats?: boolean; moving?: boolean } = {}
 ) {
   const ctx = await loadCtx(studentId);
   const term = opts.termCode ? byCode(ctx.terms, opts.termCode) : ctx.planTerm;
@@ -458,8 +459,29 @@ export async function checkAdditionFor(
   const others = (await sql`
     SELECT pi.id, pi.course_id, pi.section_id, pi.term_id FROM plan_items pi
     WHERE pi.plan_id = ${planId ?? 0} AND pi.id <> ${opts.replaceItemId ?? 0}`) as any[];
+  let oldTermKey: number | null = null;
+  if (opts.moving && opts.replaceItemId) {
+    const [old] = (await sql`SELECT term_id FROM plan_items WHERE id = ${opts.replaceItemId}`) as any[];
+    oldTermKey = old ? (byId(ctx.terms, old.term_id) as Term).key : null;
+  }
   const plannedOthers: Planned[] = others.map((o) => ({ courseId: o.course_id, termKey: (byId(ctx.terms, o.term_id) as Term).key }));
 
+  // Moving a course later can leave a course that depends on it (planned in the same or an earlier term) without its prerequisite.
+  const isMove = opts.moving === true && opts.replaceItemId != null;
+  const dependentsBroken = (atKey: number) => {
+    if (!isMove) return [] as { courseId: number; code: string; termCode: string }[];
+    const before: Planned[] = [...plannedOthers, { courseId, termKey: oldTermKey ?? atKey }];
+    const after: Planned[] = [...plannedOthers, { courseId, termKey: atKey }];
+    return others
+      .filter((o) => o.course_id !== courseId)
+      .filter((o) => {
+        const k = (byId(ctx.terms, o.term_id) as Term).key;
+        const restBefore = before.filter((x) => x.courseId !== o.course_id);
+        const restAfter = after.filter((x) => x.courseId !== o.course_id);
+        return !unmetGroups(ctx.graph, o.course_id, k, ctx.history, restBefore).length && unmetGroups(ctx.graph, o.course_id, k, ctx.history, restAfter).length > 0;
+      })
+      .map((o) => ({ courseId: o.course_id, code: ctx.catalog.get(o.course_id)?.code ?? String(o.course_id), termCode: (byId(ctx.terms, o.term_id) as Term).code }));
+  };
   const duplicate = others.some((o) => o.course_id === courseId);
   const passed = ctx.history.passed.has(courseId);
   const unmet = unmetGroups(ctx.graph, courseId, term.key, ctx.history, plannedOthers);
@@ -483,6 +505,13 @@ export async function checkAdditionFor(
   if (ctx.current && term.key <= ctx.currentKey)
     problems.push({ ...base, type: "term_not_open", severity: "high", message: `${term.name} has already started or finished, so courses can only be planned for later terms.` });
   if (!inProgram) problems.push({ ...base, type: "not_in_program", severity: "low", message: `${course.code} is not a listed requirement for this program.` });
+  const breaks = dependentsBroken(term.key);
+  if (breaks.length)
+    problems.push({
+      ...base, type: "breaks_dependent", severity: "high",
+      message: `Moving ${course.code} to ${term.name} would leave ${breaks.map((b) => b.code).join(" and ")} without a prerequisite.`,
+    });
+
   // Seat tracking is not part of the student side: students are never blocked by sections or seats.
   if (scheduled && !isSlot(course.code) && !opts.ignoreSeats) {
     if (!secs.length) problems.push({ ...base, type: "no_section", severity: "high", message: `${course.code} has no section in ${term.name}.` });
@@ -501,9 +530,9 @@ export async function checkAdditionFor(
 
   // Earliest later term where the course would be allowed ("Move to Spring 2027").
   let suggestedTerm: { code: string; name: string } | null = null;
-  if (unmet.length || (ctx.current && term.key <= ctx.currentKey)) {
+  if (unmet.length || breaks.length || (ctx.current && term.key <= ctx.currentKey)) {
     for (const t of termsAfter(ctx.terms, ctx.currentKey, 8)) {
-      if (!unmetGroups(ctx.graph, courseId, t.key, ctx.history, plannedOthers).length) {
+      if (!unmetGroups(ctx.graph, courseId, t.key, ctx.history, plannedOthers).length && !dependentsBroken(t.key).length) {
         suggestedTerm = { code: t.code, name: t.name };
         break;
       }
@@ -522,6 +551,7 @@ export async function checkAdditionFor(
     term: { code: term.code, name: term.name },
     blockingCourse,
     suggestedTerm,
+    breaks,
   };
 }
 
