@@ -13,12 +13,13 @@ function check(name: string, cond: any, extra?: unknown) {
 const section = (s: string) => console.log("\n== " + s);
 
 async function call(file: string, method: string, url: string, params: Record<string, string> = {}, body?: any) {
-  const mod = await import(pathToFileURL(`${R}/${file}`).href);
+  const mod = await import(pathToFileURL(`${R}/${file}`).href); // file:// URL: required on Windows
   const req = new Request("http://x" + url, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const res = await mod[method](req, { params: Promise.resolve(params) });
   return { status: res.status as number, body: (await res.json()) as any };
 }
 const cid = async (code: string) => ((await sql`SELECT id FROM courses WHERE code = ${code}`) as any[])[0].id as number;
+const bc2 = (b: any, code: string) => b.courses.find((c: any) => c.code === code);
 const item = (plan: any, code: string) => plan.items.find((i: any) => i.code === code);
 
 async function main() {
@@ -26,10 +27,13 @@ async function main() {
   const m003 = readFileSync(resolve(__dirname, "../../migrations/003_figma_alignment.sql"), "utf8");
   for (const f of ["00_schema", "01_risk_and_stubs", "02_migration"]) await pg.exec(readFileSync(`${__dirname}/sql/${f}.sql`, "utf8"));
   await pg.exec(m003);
+  const m004 = readFileSync(resolve(__dirname, "../../migrations/004_student_side.sql"), "utf8");
+  await pg.exec(m004);
   await pg.exec(readFileSync(`${__dirname}/sql/04_seed.sql`, "utf8"));
-  // migration 003 must be re-runnable
+  // migrations 003 and 004 must be re-runnable
   await pg.exec(m003);
-  console.log("schema + migrations 001-003 + seed loaded (003 ran twice)");
+  await pg.exec(m004);
+  console.log("schema + migrations 001-004 + seed loaded (003 and 004 ran twice)");
 
   const NORA = 1, PRIYA = 2, TYLER = 4;
   const AVERY = 1, MARCUS = 2;
@@ -301,6 +305,245 @@ async function main() {
   check("removing COP 4331 affects COP 4934 (direct) and COP 4935 (knock-on)", JSON.stringify(r.body.dependents.map((x: any) => [x.code, x.direct])) === '[["COP 4934",true],["COP 4935",false]]', r.body.dependents);
   r = await call("plans/[id]/courses/[courseId]/route.ts", "PATCH", `/api/plans/${P}/courses/${await cid("COP 4935")}`, { id: P, courseId: String(await cid("COP 4935")) }, { termCode: "fall-2027", advisorId: AVERY });
   check("Senior Design II in the same term as Senior Design I -> 422, suggests Spring 2028", r.status === 422 && r.body.blockingCourse?.code === "COP 4934" && r.body.suggestedTerm?.code === "spring-2028", r.body);
+
+  // ================================================================ STUDENT SIDE
+  section("student login list");
+  r = await call("students/route.ts", "GET", "/api/students");
+  check("lists all students", r.status === 200 && r.body.page.total === 5 && r.body.students.length === 5, r.body.page);
+  check("each student has program, advisor and plan status", r.body.students.every((s: any) => "program_name" in s && "advisor_name" in s && "plan_status" in s && typeof s.courses_on_file === "number"));
+  r = await call("students/route.ts", "GET", "/api/students?search=nor");
+  check("search by name", r.body.students.length === 1 && r.body.students[0].display_name === "Nora Reyes" && r.body.students[0].courses_on_file === 10, r.body.students);
+  r = await call("students/login/route.ts", "POST", "/api/students/login", {}, { studentId: NORA });
+  check("login with history -> next board", r.status === 200 && r.body.studentId === NORA && r.body.next === "board" && r.body.student.programName === "Computer Science B.S.", r.body);
+  r = await call("students/login/route.ts", "POST", "/api/students/login", {}, { studentId: TYLER });
+  check("login with nothing on file -> next upload", r.body.next === "upload", r.body);
+  r = await call("students/login/route.ts", "POST", "/api/students/login", {}, { studentId: 99 });
+  check("login unknown student -> 404", r.status === 404 && r.body.code === "student_not_found");
+  r = await call("students/login/route.ts", "POST", "/api/students/login", {}, {});
+  check("login without studentId -> 400", r.status === 400 && r.body.code === "invalid_request");
+
+  section("programs + manual picker");
+  r = await call("programs/route.ts", "GET", "/api/programs");
+  check("programs list with credit totals", r.status === 200 && r.body.programs.length === 2 && r.body.programs.every((p: any) => p.totalCredits === 120), r.body);
+  const csProgram = r.body.programs.find((p: any) => p.name === "Computer Science B.S.").id as number;
+  check("CS program counts its requirements", r.body.programs.find((p: any) => p.id === csProgram).courses === 22);
+  r = await call("programs/[id]/courses/route.ts", "GET", `/api/programs/${csProgram}/courses`, { id: String(csProgram) });
+  const pgrp = (n: string) => r.body.groups?.find((g: any) => g.requirement === n);
+  check("courses grouped by requirement, pick-1 electives marked", r.status === 200 && pgrp("CS restricted elective")?.pickCount === 1 && pgrp("CS restricted elective").courses.length === 4, r.body.groups?.map((g: any) => g.requirement));
+  check("slots are flagged", pgrp("Humanities")?.courses[0].isSlot === true);
+  check("each course has id, code, title, credits", r.body.groups.every((g: any) => g.courses.every((c: any) => c.courseId && c.code && c.title && typeof c.credits === "number")));
+  r = await call("programs/[id]/courses/route.ts", "GET", `/api/programs/999/courses`, { id: "999" });
+  check("unknown program -> 404", r.status === 404 && r.body.code === "program_not_found");
+
+  section("saving courses taken");
+  const ZED = ((await sql`INSERT INTO students (university_id, display_name) SELECT id, 'Zed Newcomer' FROM universities LIMIT 1 RETURNING id`) as any[])[0].id as number;
+  const zp = { id: String(ZED) };
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  check("board before a major is picked -> 409 no_program", r.status === 409 && r.body.code === "no_program", r.body);
+  const [c3223, c3100, c2311, c3502, c3330, c3503, c4331, c4210, c4600, c4020, c3360, c3103] = await Promise.all(
+    ["COP 3223", "COT 3100", "MAC 2311", "COP 3502", "COP 3330", "COP 3503", "COP 4331", "COT 4210", "COP 4600", "COP 4020", "CIS 3360", "CDA 3103"].map(cid)
+  );
+  const put = (body: any, id = ZED) => call("students/[id]/completed-courses/route.ts", "PUT", `/api/students/${id}/completed-courses`, { id: String(id) }, body);
+  r = await put({ programId: csProgram, courses: [{ courseId: c3223, grade: "a" }, { courseId: c2311, grade: "B+" }, { courseId: c3100 }, { courseId: c3502, status: "in_progress" }] });
+  check("save 4 courses and the major", r.status === 200 && r.body.saved === 4 && r.body.programId === csProgram && r.body.next === "board", r.body);
+  check("credit bar numbers (taken 10, in progress 3)", r.body.credits.earned === 10 && r.body.credits.inProgress === 3, r.body.credits);
+  r = await call("students/[id]/completed-courses/route.ts", "GET", `/api/students/${ZED}/completed-courses`, zp);
+  const byCode = (code: string) => r.body.courses.find((c: any) => c.code === code);
+  check("grade upper-cased; no grade saved as P; in progress has no grade or error", byCode("COP 3223").grade === "A" && byCode("COT 3100").grade === "P" && byCode("COP 3502").status === "in_progress" && byCode("COP 3502").grade === null, r.body.courses);
+  check("in-progress course lands in the current term", byCode("COP 3502").termCode === "fall-2026", byCode("COP 3502"));
+  r = await put({ courses: [{ courseId: c3223, grade: "Z" }] });
+  check("bad grade -> 400 invalid_grade", r.status === 400 && r.body.code === "invalid_grade" && r.body.courseId === c3223, r.body);
+  r = await put({ courses: [{ courseId: 99999 }] });
+  check("unknown course -> 404 and nothing changed", r.status === 404 && r.body.code === "course_not_found", r.body);
+  r = await put({ courses: [{ courseId: c3223, status: "in_progress", grade: "A" }] });
+  check("grade on an in-progress course -> 400", r.status === 400 && r.body.code === "invalid_request");
+  r = await put({ programId: 999, courses: [] });
+  check("unknown programId -> 404", r.status === 404 && r.body.code === "program_not_found");
+  r = await put({ courses: "x" });
+  check("courses must be a list -> 400", r.status === 400);
+  r = await put({ courses: [{ courseId: c3330, grade: "B", termCode: "spring-2026" }], mode: "merge" });
+  check("merge keeps the other courses", r.status === 200 && r.body.saved === 5, r.body);
+  r = await put({ courses: [{ courseId: c3330, termCode: "nope" }], mode: "merge" });
+  check("unknown term -> 400 term_not_found", r.status === 400 && r.body.code === "term_not_found");
+  r = await call("students/[id]/completed-courses/route.ts", "GET", `/api/students/${ZED}/completed-courses`, zp);
+  check("failed saves changed nothing (still 5)", r.body.courses.length === 5, r.body.courses.length);
+  r = await put({ courses: [{ courseId: c3223, grade: "A" }, { courseId: c3223, grade: "B" }, { courseId: c3100 }, { courseId: c2311, grade: "B+" }, { courseId: c3502, status: "in_progress" }] });
+  check("a duplicate course is saved once (last one wins)", r.body.saved === 4, r.body);
+  r = await call("students/[id]/completed-courses/route.ts", "GET", `/api/students/${ZED}/completed-courses`, zp);
+  check("...with the later grade", r.body.courses.find((c: any) => c.code === "COP 3223").grade === "B");
+  await put({ courses: [{ courseId: c3223, grade: "A" }, { courseId: c3100 }, { courseId: c2311, grade: "B+" }, { courseId: c3502, status: "in_progress" }] });
+
+  section("the canvas (board)");
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  let board = r.body;
+  const bc = (code: string) => board.courses.find((c: any) => c.code === code);
+  check("200 with header, terms, courses, edges", r.status === 200 && board.header && board.terms && board.courses && board.edges, Object.keys(board));
+  check("statuses: taken / in progress / available / locked", bc("COP 3223").status === "taken" && bc("COP 3502").status === "in_progress" && bc("COP 3330").status === "available" && bc("COP 4331").status === "locked", board.courses.map((c: any) => c.code + ":" + c.status));
+  check("a course waiting on one in progress says what it needs", bc("COP 3503").status === "locked" && bc("COP 3503").prereq === "needs" && bc("COP 3503").needs.includes("COP 3502"), bc("COP 3503"));
+  check("a course waiting on one not started is locked", bc("CIS 3360").prereq === "locked", bc("CIS 3360"));
+  check("every course of the major is a note", board.courses.filter((c: any) => c.inProgram).length === 22, board.courses.filter((c: any) => c.inProgram).length);
+  check("taken course sits in its term (or none), in-progress one in the current term", bc("COP 3502").termCode === "fall-2026" && bc("COP 3330").termCode === null, [bc("COP 3502").termCode, bc("COP 3330").termCode]);
+  check("prerequisite lines", board.edges.some((e: any) => e.from === c3223 && e.to === c3502) && board.edges.some((e: any) => e.from === c3503 && e.to === c4331), board.edges.length);
+  check("top bar: credits, remaining, GPA from graded courses only", board.header.creditsCompleted === 10 && board.header.creditsInProgress === 3 && board.header.creditsRemaining === 110 && board.header.creditsTotal === 120 && board.header.gpa === 3.57, board.header);
+  check("next term is a column even with nothing in it", board.terms.some((t: any) => t.code === "spring-2027" && t.label === "Up next" && t.courses === 0) && board.terms.some((t: any) => t.code === "fall-2026" && t.state === "current"), board.terms);
+  check("no plan yet: editable, plan null", board.plan === null && board.editable === true);
+
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${NORA}/board`, { id: String(NORA) });
+  board = r.body;
+  check("Nora: GPA 3.54, 23 credits done, plan attached", r.status === 200 && board.header.gpa === 3.54 && board.header.creditsCompleted === 23 && String(board.plan?.id) === P, board.header);
+  check("Nora: planned notes carry term, issues and the plan's per-term totals", bc("COT 4210").status === "planned" && bc("COT 4210").termCode === "spring-2027" && Array.isArray(bc("COT 4210").issues) && board.totals.byTerm.length >= 2, board.totals);
+  // The test terms table stops at Spring 2029, so 61 credits at 12 a term run past it: no invented term code, just null.
+  check("Nora: projected graduation is null when the terms table has no term that far out", board.header.projectedGraduation === null, board.header.projectedGraduation);
+  check("Nora: planned credits counted (27) and 61 credits still unplanned", board.header.creditsPlanned === 27 && board.header.creditsInProgress === 9, board.header);
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/99/board`, { id: "99" });
+  check("unknown student -> 404", r.status === 404 && r.body.code === "student_not_found");
+
+  // projected graduation, positive case: an IT student with 3 credits done and a (temporarily) 20-credit degree
+  // needs 17 more = two 15-credit terms after the current one (Fall 2026) -> Fall 2027 (summer skipped)
+  await sql`UPDATE programs SET total_credits = 20 WHERE name = 'Information Technology B.S.'`;
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/3/board`, { id: "3" });
+  check("projected graduation counts forward from the current term, skipping summer", r.status === 200 && r.body.header.projectedGraduation?.code === "fall-2027", r.body.header);
+  await sql`UPDATE programs SET total_credits = 120 WHERE name = 'Information Technology B.S.'`;
+
+  section("student edits: check while dragging, add, move, remove");
+  const add = (body: any, id = ZED) => call("students/[id]/board/courses/route.ts", "POST", `/api/students/${id}/board/courses`, { id: String(id) }, body);
+  const move = (courseId: number, body: any, id = ZED) => call("students/[id]/board/courses/[courseId]/route.ts", "PATCH", `/api/students/${id}/board/courses/${courseId}`, { id: String(id), courseId: String(courseId) }, body);
+  const plansOf = async (id = ZED) => ((await sql`SELECT COUNT(*)::int AS n FROM plans WHERE student_id = ${id}`) as any[])[0].n as number;
+  r = await add({ courseId: c4210, termCode: "spring-2027", dryRun: true });
+  check("dryRun with no plan: allowed, nothing saved", r.status === 200 && r.body.dryRun === true && r.body.blocking === false && (await plansOf()) === 0, r.body.problems);
+  r = await add({ courseId: c4331, termCode: "spring-2027", dryRun: true });
+  check("dryRun on a blocked drop shows the blocking course (screen 7)", r.status === 200 && r.body.blocking === true && r.body.blockingCourse?.code === "COP 3503" && r.body.missing.includes("COP 3503"), r.body);
+  r = await add({ courseId: c4331, termCode: "spring-2027" });
+  check("real add that fails -> 422 check_failed with the same payload", r.status === 422 && r.body.code === "check_failed" && r.body.blockingCourse?.code === "COP 3503" && Array.isArray(r.body.problems) && r.body.term?.code === "spring-2027", r.body);
+  check("...and no empty plan is left behind", (await plansOf()) === 0);
+  r = await add({ courseId: c4600, termCode: "spring-2027", force: true, advisorId: AVERY });
+  check("a student cannot force an override", r.status === 422 && r.body.code === "check_failed", r.body);
+  r = await add({});
+  check("add without courseId -> 400", r.status === 400 && r.body.code === "invalid_request");
+  r = await add({ courseId: 99999, termCode: "spring-2027" });
+  check("unknown course -> 404", r.status === 404 && r.body.code === "course_not_found", r.body);
+  r = await add({ courseId: c4210, termCode: "spring-2027", __studentId: NORA });
+  check("add OK -> 201, plan created for the student by the student", r.status === 201 && r.body.plan.createdBy === "student" && r.body.plan.status === "draft" && r.body.added?.code === "COT 4210" && r.body.plan.studentId === ZED, r.body);
+  const zItem = (b: any, code: string) => b.items.find((i: any) => i.code === code);
+  check("the item is a student course, confirmed (not a 'Suggested' one), with its section", zItem(r.body, "COT 4210").source === "student" && zItem(r.body, "COT 4210").confirmed === true && zItem(r.body, "COT 4210").suggested === false && !!zItem(r.body, "COT 4210").section, zItem(r.body, "COT 4210"));
+  const ev = r.body.events.find((e: any) => e.action === "added_course");
+  check("audit trail names the student (a spoofed __studentId in the body is ignored)", ev.actor_type === "student" && ev.student_name === "Zed Newcomer" && ev.advisor_name === null, ev);
+  r = await add({ courseId: c4210, termCode: "spring-2027" });
+  check("adding the same course again -> 422 already_planned", r.status === 422 && r.body.problems.some((p: any) => p.type === "already_planned"), r.body);
+  r = await add({ courseId: c3503, termCode: "fall-2027" });
+  check("COP 3503 into Fall 2027 (COP 3502 finishes this term)", r.status === 201, r.body.problems);
+  r = await add({ courseId: c3330, termCode: "fall-2027" });
+  check("COP 3330 into Fall 2027", r.status === 201, r.body.problems);
+  r = await add({ courseId: c4331, termCode: "fall-2027" });
+  check("COP 4331 in the same term as COP 3503 -> 422, suggests Spring 2028", r.status === 422 && r.body.blockingCourse?.code === "COP 3503" && r.body.suggestedTerm?.code === "spring-2028", r.body);
+  r = await add({ courseId: c4331, termCode: "spring-2028" });
+  check("COP 4331 into Spring 2028", r.status === 201 && zItem(r.body, "COP 4331").termCode === "spring-2028", r.body.problems);
+
+  r = await move(c4210, { termCode: "fall-2026", dryRun: true });
+  check("hover over a finished term: dryRun says it cannot go there", r.status === 200 && r.body.dryRun === true && r.body.moves === "COT 4210" && r.body.problems.some((p: any) => p.type === "term_not_open"), r.body);
+  r = await move(c4331, { termCode: "fall-2027", dryRun: true });
+  check("valid-drop vs invalid-drop: moving COP 4331 beside COP 3503 is blocked", r.status === 200 && r.body.blocking === true && r.body.blockingCourse?.code === "COP 3503" && r.body.suggestedTerm?.code === "spring-2028", r.body);
+  r = await move(c4331, { termCode: "fall-2027" });
+  check("dropping it there -> 422 check_failed, not moved", r.status === 422 && r.body.code === "check_failed" && r.body.blockingCourse?.code === "COP 3503", r.body);
+  r = await move(c4210, { termCode: "fall-2027" });
+  check("valid drop -> 200 moved", r.status === 200 && r.body.moved?.from === "spring-2027" && r.body.moved?.to === "fall-2027" && zItem(r.body, "COT 4210").termCode === "fall-2027", r.body.problems ?? r.body.moved);
+  check("...credit totals for both semesters follow", r.body.totals.byTerm.find((t: any) => t.code === "fall-2027")?.credits === 9, r.body.totals.byTerm);
+  check("...still a student course", zItem(r.body, "COT 4210").source === "student");
+  r = await move(c4934, { termCode: "fall-2027" });
+  check("moving a course that is not on the board -> 404", r.status === 404 && r.body.code === "item_not_found");
+  r = await move(c4210, {});
+  check("move without termCode -> 400", r.status === 400 && r.body.code === "invalid_request");
+  r = await call("students/[id]/board/courses/[courseId]/route.ts", "DELETE", `/api/students/${ZED}/board/courses/${c4210}`, { id: String(ZED), courseId: String(c4210) });
+  check("remove -> 200 removed", r.status === 200 && r.body.removed?.code === "COT 4210" && !zItem(r.body, "COT 4210"), r.body);
+  r = await call("students/[id]/board/courses/[courseId]/restore/route.ts", "POST", `/api/students/${ZED}/board/courses/${c4210}/restore`, { id: String(ZED), courseId: String(c4210) });
+  check("undo -> back in Fall 2027", r.status === 200 && zItem(r.body, "COT 4210")?.termCode === "fall-2027", r.body);
+  r = await call("students/[id]/board/courses/[courseId]/restore/route.ts", "POST", `/api/students/${ZED}/board/courses/${c4210}/restore`, { id: String(ZED), courseId: String(c4210) });
+  check("second undo -> 404 nothing_to_restore", r.status === 404 && r.body.code === "nothing_to_restore");
+  r = await call("students/[id]/board/courses/[courseId]/route.ts", "DELETE", `/api/students/${ZED}/board/courses/${c4934}`, { id: String(ZED), courseId: String(c4934) });
+  check("remove a course that is not planned -> 404", r.status === 404 && r.body.code === "item_not_found");
+  r = await call("students/[id]/board/courses/route.ts", "POST", `/api/students/99/board/courses`, { id: "99" }, { courseId: c4210 });
+  check("edits for an unknown student -> 404", r.status === 404 && r.body.code === "student_not_found");
+
+  section("student edits vs plan status");
+  const zPlan = ((await sql`SELECT id FROM plans WHERE student_id = ${ZED}`) as any[])[0].id as number;
+  r = await call("students/[id]/plan/route.ts", "GET", `/api/students/${ZED}/plan`, zp);
+  check("the advisor sees the student's plan through the normal plan route", r.status === 200 && r.body.plan.id === zPlan && r.body.plan.createdBy === "student" && r.body.items.length === 4, r.body.plan);
+  r = await call("plans/[id]/submit-review/route.ts", "POST", `/api/plans/${zPlan}/submit-review`, { id: String(zPlan) }, { advisorId: AVERY });
+  check("advisor sends it to review", r.status === 200 && r.body.plan.status === "in_review");
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  check("board of a plan in review is still editable", r.body.editable === true && r.body.plan.status === "in_review", r.body.plan);
+  r = await move(c4210, { termCode: "spring-2028" });
+  check("student edit while in review is allowed and sends the plan back to draft", r.status === 200 && r.body.plan.status === "draft" && r.body.plan.submittedAt === null, r.body.plan ?? r.body);
+  r = await move(c4210, { termCode: "fall-2027" });
+  check("(moved back)", r.status === 200);
+  r = await add({ courseId: c3103, termCode: "spring-2027", dryRun: true });
+  check("no section in Spring 2027 (CDA 3103) does not block a student", r.status === 200 && r.body.blocking === false && !r.body.problems.some((p: any) => /section/.test(p.type)), r.body.problems);
+  r = await call("plans/[id]/courses/route.ts", "POST", `/api/plans/${zPlan}/courses`, { id: String(zPlan) }, { courseId: c3103, termCode: "spring-2027", advisorId: AVERY, dryRun: true });
+  check("...while the advisor's check still flags the missing section", r.body.blocking === true && r.body.problems.some((p: any) => p.type === "no_section"), r.body.problems);
+  await call("plans/[id]/back-to-draft/route.ts", "POST", `/api/plans/${zPlan}/back-to-draft`, { id: String(zPlan) }, { advisorId: AVERY });
+  await sql`UPDATE plans SET status = 'approved', approved_at = NOW(), approved_by = ${AVERY} WHERE id = ${zPlan}`;
+  r = await move(c4210, { termCode: "spring-2028" });
+  check("student edit on an approved plan -> 409 read_only", r.status === 409 && r.body.code === "read_only", r.body);
+  r = await call("students/[id]/board/courses/[courseId]/route.ts", "DELETE", `/api/students/${ZED}/board/courses/${c4210}`, { id: String(ZED), courseId: String(c4210) });
+  check("...remove too", r.status === 409 && r.body.code === "read_only");
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  check("approved board: read-only, approver named", r.body.plan.readOnly === true && r.body.editable === false && r.body.plan.approvedBy === "Dr. Avery Dunn", r.body.plan);
+  await call("plans/[id]/reopen/route.ts", "POST", `/api/plans/${zPlan}/reopen`, { id: String(zPlan) }, { advisorId: AVERY });
+  r = await call("plans/[id]/courses/route.ts", "POST", `/api/plans/${zPlan}/courses`, { id: String(zPlan) }, { courseId: c4020, termCode: "spring-2027", advisorId: AVERY });
+  check("advisor can still edit the student's plan; source is advisor", r.status === 201 && zItem(r.body, "COP 4020").source === "advisor" && r.body.events.some((e: any) => e.action === "added_course" && e.actor_type === "advisor"), r.body.problems);
+
+  section("course side panel");
+  const detail = (courseId: number, q = "", id = ZED) => call("students/[id]/courses/[courseId]/route.ts", "GET", `/api/students/${id}/courses/${courseId}${q}`, { id: String(id), courseId: String(courseId) });
+  r = await detail(c4331);
+  check("planned course: status, where, prerequisites with their state", r.status === 200 && r.body.status === "planned" && r.body.plannedIn === "spring-2028" && r.body.prerequisites[0].options[0].code === "COP 3503" && r.body.prerequisites[0].options[0].state === "planned" && r.body.prerequisites[0].met === false, r.body);
+  check("...a planned course has no 'add' button data", r.body.addTo === null);
+  check("...unlocks list COP 4934 and would open it up", r.body.unlocks.find((u: any) => u.code === "COP 4934")?.opensUp === true, r.body.unlocks);
+  r = await detail(c3503);
+  check("COP 3503 unlocks: COP 4710 would open up, COP 4600 would not (needs COP 3402), COP 4331 is already planned", r.body.unlocks.find((u: any) => u.code === "COP 4710")?.opensUp === true && r.body.unlocks.find((u: any) => u.code === "COP 4600")?.opensUp === false && r.body.unlocks.find((u: any) => u.code === "COP 4331")?.opensUp === false && r.body.unlocks.find((u: any) => u.code === "COP 4331")?.state === "planned", r.body.unlocks);
+  r = await detail(c4020, "?term=spring-2027");
+  check("a course that is advisor-planned reads as planned", r.body.status === "planned");
+  r = await detail(c3360, "?term=spring-2027");
+  check("locked course: addTo not allowed, says what is missing", r.body.status === "locked" && r.body.addTo?.allowed === false && r.body.addTo.missing.some((m: string) => /CDA 3103/.test(m)) && r.body.addTo.blockingCourse?.code === "CDA 3103", r.body.addTo);
+  r = await detail(c3223);
+  check("taken course: status taken, no add data", r.body.status === "taken" && r.body.addTo === null && r.body.unlocks.some((u: any) => u.code === "COP 3502"));
+  r = await detail(c4600, "?term=spring-2027");
+  check("addTo has the term name for the button ('Add to Spring 2027')", r.body.addTo?.termCode === "spring-2027" && r.body.addTo.termName === "Spring 2027", r.body.addTo);
+  check("professors and threads are empty lists until data is loaded", Array.isArray(r.body.professors) && r.body.professors.length === 0 && Array.isArray(r.body.threads) && r.body.threads.length === 0);
+  await sql`INSERT INTO course_professors (course_id, name, rating, rating_count, difficulty, source_url) VALUES (${c4600}, 'Dr. Ada Example', 4.5, 120, 3.1, 'https://example.org/prof')`;
+  await sql`INSERT INTO course_threads (course_id, title, url, replies, posted_at) VALUES (${c4600}, 'Is COP 4600 hard?', 'https://example.org/thread', 14, NOW())`;
+  r = await detail(c4600, "?term=spring-2027");
+  check("professors and threads show when loaded", r.body.professors[0]?.name === "Dr. Ada Example" && r.body.professors[0].rating === 4.5 && r.body.threads[0]?.title === "Is COP 4600 hard?" && r.body.threads[0].replies === 14, [r.body.professors, r.body.threads]);
+  r = await detail(99999);
+  check("unknown course -> 404", r.status === 404 && r.body.code === "course_not_found");
+  r = await detail(c4600, "?term=nope");
+  check("unknown term -> 400", r.status === 400 && r.body.code === "term_not_found");
+  r = await detail(c4600, "", 99);
+  check("unknown student -> 404", r.status === 404 && r.body.code === "student_not_found");
+
+  section("prerequisites outside the major (like COP 2500 before COP 3330)");
+  await sql`INSERT INTO courses (university_id, subject, number, title, credits) SELECT id, 'MAC', '1105', 'College Algebra', 3 FROM universities LIMIT 1`;
+  await sql`INSERT INTO courses (university_id, subject, number, title, credits) SELECT id, 'MAT', '1033', 'Pre-Algebra', 3 FROM universities LIMIT 1`;
+  const cMac1105 = await cid("MAC 1105"), cMat1033 = await cid("MAT 1033");
+  await sql`INSERT INTO prerequisites (course_id, required_course_id, kind, group_no) VALUES (${c3360}, ${cMac1105}, 'prereq', 5), (${cMac1105}, ${cMat1033}, 'prereq', 1)`;
+  r = await call("programs/[id]/courses/route.ts", "GET", `/api/programs/${csProgram}/courses`, { id: String(csProgram) });
+  const other = r.body.groups.find((g: any) => g.requirement === "other_prerequisites");
+  check("picker lists prerequisites outside the major, including prerequisites of prerequisites", other && other.courses.map((c: any) => c.code).join() === "MAC 1105,MAT 1033" && other.courses.every((c: any) => c.inProgram === false), other);
+  check("...and the major's own courses are marked inProgram", r.body.groups.filter((g: any) => g.requirement !== "other_prerequisites").every((g: any) => g.courses.every((c: any) => c.inProgram === true)));
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  check("board shows them as notes outside the major, with prerequisite lines", bc2(r.body, "MAC 1105")?.inProgram === false && bc2(r.body, "CIS 3360").prereq !== "available" && r.body.edges.some((e: any) => e.from === cMac1105 && e.to === c3360) && r.body.edges.some((e: any) => e.from === cMat1033 && e.to === cMac1105), r.body.edges.length);
+  check("...locked by what it needs", bc2(r.body, "MAC 1105").status === "locked" && bc2(r.body, "MAC 1105").needs.includes("MAT 1033"), bc2(r.body, "MAC 1105"));
+  await put({ mode: "merge", courses: [{ courseId: cMat1033, grade: "B" }, { courseId: cMac1105, grade: "A" }] });
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  check("saving them works and the board marks them taken", bc2(r.body, "MAC 1105").status === "taken" && bc2(r.body, "MAT 1033").status === "taken", r.body.courses.filter((c: any) => !c.inProgram).map((c: any) => c.code + ":" + c.status));
+  await sql`DELETE FROM prerequisites WHERE required_course_id IN (${cMac1105}, ${cMat1033})`;
+  await sql`DELETE FROM completed_courses WHERE course_id IN (${cMac1105}, ${cMat1033})`;
+  await sql`DELETE FROM courses WHERE id IN (${cMac1105}, ${cMat1033})`;
+
+  section("student edits do not break the advisor side");
+  r = await call("advisors/[advisorId]/students/route.ts", "GET", `/api/advisors/${AVERY}/students`, { advisorId: String(AVERY) });
+  check("advisor list still works", r.status === 200 && r.body.students.length === 4, r.body.students?.length);
+  r = await call("demand/route.ts", "GET", `/api/demand?term=fall-2027`);
+  check("seat demand counts the student's planned courses", r.status === 200 && r.body.courses.length >= 0, r.body);
 
   // ---------------------------------------------------------------- pregenerate
   process.env.ADMIN_SECRET = "s";
