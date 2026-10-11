@@ -6,6 +6,7 @@ import { FirebaseError } from "firebase/app";
 import { getDatabase, ref, get } from "firebase/database";
 import { auth } from "../../lib/firebase";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 
 type Role = "student" | "advisor";
 
@@ -184,8 +185,8 @@ export default function LoginPage() {
       } else {
         const code =
           typeof err === "object" &&
-          err !== null &&
-          "code" in err
+            err !== null &&
+            "code" in err
             ? String(err.code)
             : "";
 
@@ -238,9 +239,14 @@ export default function LoginPage() {
 
       <header className="tt-nav">
         <div className="tt-brand">
-          <span className="tt-brand-icon">
-            <CapIcon size={18} />
-          </span>
+          <Image
+            src="/logo.png"
+            alt="TasselTrak logo"
+            width={40}
+            height={40}
+            priority
+            style={{ objectFit: "contain" }}
+          />
           <span>TasselTrak</span>
         </div>
       </header>
