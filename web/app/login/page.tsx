@@ -391,20 +391,17 @@ export default function LoginPage() {
   return (
     <main className="flex min-h-screen flex-1 flex-col bg-surface-canvas text-ink-primary">
       {/* Top bar */}
-      <header className="relative z-10 flex h-16 flex-none items-center justify-between px-6">
+      <header className="relative z-10 flex h-16 flex-none items-center px-6">
         <div className="flex items-center gap-[10px]">
-          <Image src="/login/mark.svg" alt="" width={32} height={32} />
+          <Image src="/logo.png" alt="TasselTrak logo" width={40} height={40} priority className="object-contain" />
           <span className="text-title-18 text-ink-primary">TasselTrak</span>
         </div>
-        <a href="#how" className="text-label-14 text-ink-secondary hover:text-ink-primary">
-          How it works
-        </a>
       </header>
 
       <div className="relative flex flex-1 flex-col items-center pb-12 short:pb-6 short:pt-3">
         <BackgroundArt />
 
-        <section className="relative my-auto flex w-full max-w-[760px] flex-col items-center gap-7 px-5 short:gap-4" id="how">
+        <section className="relative my-auto flex w-full max-w-[760px] flex-col items-center gap-7 px-5 short:gap-4">
           <div className="flex w-full flex-col items-center gap-3 text-center short:gap-2">
             <h1 className="text-display-44 text-ink-primary max-sm:text-[32px] max-sm:leading-10 short:text-[32px] short:leading-[38px]">
               Your whole degree,<br />on one board.
