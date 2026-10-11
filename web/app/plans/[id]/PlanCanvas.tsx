@@ -1,695 +1,115 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Image from "next/image";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import {
-  BaseEdge,
-  Handle,
-  MarkerType,
-  Panel,
-  Position,
-  ReactFlow,
-  useReactFlow,
-  useViewport,
-  type Edge,
-  type EdgeProps,
-  type Node,
-  type NodeProps,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
+import { useRouter } from "next/navigation";
 import { TopBar } from "@/components/TopBar";
 import { Button, ButtonLink } from "@/components/Button";
 import { Avatar, Pill, PlanStatusChip } from "@/components/Chip";
-import { CourseNode, SuggestedTag, type CourseState } from "@/components/CourseNode";
 import { Skeleton, StateMessage } from "@/components/State";
-import { FetchError, getJson, reasonOf } from "@/lib/fetchJson";
-import type { Advisor } from "@/lib/useAdvisorSession";
 import {
-  buildBoard,
-  COL_GAP,
-  ROW_GAP,
-  prerequisiteGroups,
-  unlockedBy,
-  HEADER_H,
-  NODE_H,
-  NODE_W,
-  type Board,
-  type BoardColumn,
-  type BoardCourse,
-  type BoardGroup,
+  addCourse,
+  codeOf,
+  confirmCourse,
+  explain,
+  generatePlan,
+  getCourseOptions,
+  getDependents,
+  getPlan,
+  getPrerequisites,
+  getStudentExtras,
+  moveCourse,
+  PlanApiError,
+  removeCourse,
+  restoreCourse,
+  swapCourse,
+  type Alternative,
+  type CourseOptions,
   type PlanResponse,
   type Prerequisite,
-  type StudentResponse,
-} from "./board";
+  type StudentExtras,
+  type TermRef,
+} from "@/lib/planApi";
+import type { Advisor } from "@/lib/useAdvisorSession";
+import { BoardCanvas } from "./BoardCanvas";
+import {
+  CoursePicker,
+  GenerateDialog,
+  GeneratingBanner,
+  NoticeBanner,
+  RemoveDialog,
+  Toast,
+  type Dependents,
+  type PickerError,
+} from "./Dialogs";
+import { PlanPanel, PlanPanelSkeleton, type EditError } from "./PlanPanel";
+import { buildBoard, planTerms, termAfter, NODE_W, type BoardColumn, type BoardCourse } from "./board";
+
+// Everything the board is built from. `later` is the empty plan term after the last one, shown
+// so courses can be moved into it; null when the API does not know that term or the plan is
+// read-only.
+type BoardData = {
+  plan: PlanResponse;
+  prerequisites: Prerequisite[];
+  options: Record<string, CourseOptions>;
+  extras: StudentExtras | null;
+  later: TermRef | null;
+};
 
 type Load =
   | { status: "loading" }
   | { status: "missing" }
   | { status: "error"; reason: string }
-  | { status: "ready"; plan: PlanResponse; student: StudentResponse; prerequisites: Prerequisite[] };
+  | { status: "ready"; data: BoardData };
 
-const STATE_ICON: Record<CourseState, string> = {
-  taken: "/login/icon-taken.svg",
-  "in-progress": "/login/icon-in-progress.svg",
-  available: "/login/icon-available.svg",
-  locked: "/login/icon-locked.svg",
-  suggested: "/plan/suggested.svg",
-};
+// A course as the change handlers need it: enough to call the API and to name it.
+type CourseRef = { courseId: number; code: string; nodeId?: string };
 
-const BADGE_ICON = {
-  lock: "/plan/conflict-lock.svg",
-  clock: "/plan/conflict-clock.svg",
-  warning: "/advisor/risk-high.svg",
-};
+type Dialog =
+  | null
+  | { kind: "generate"; planId: number; status: PlanResponse["plan"]["status"] }
+  | { kind: "picker"; term: TermRef }
+  | { kind: "remove"; course: BoardCourse };
 
-const LABEL = "text-overline-12 uppercase whitespace-nowrap text-ink-secondary";
+type Generation =
+  | { status: "idle" }
+  | { status: "running" }
+  | { status: "failed"; message: string; retry: (() => void) | null };
 
-// ---------------------------------------------------------------- board nodes
+type ToastState = { message: string; undo?: () => void };
 
-type CourseData = {
-  course: BoardCourse;
-  selected: boolean;
-  dimmed: boolean;
-  onSelect: (id: string) => void;
-  onHover: (id: string | null) => void;
-};
-
-const HIDDEN_HANDLE = { opacity: 0, pointerEvents: "none" } as const;
-
-function CourseFlowNode({ data }: NodeProps<Node<CourseData>>) {
-  const { course, selected, dimmed, onSelect, onHover } = data;
-  return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={() => onSelect(course.id)}
-      onMouseEnter={() => onHover(course.id)}
-      onMouseLeave={() => onHover(null)}
-      onFocus={() => onHover(course.id)}
-      onBlur={() => onHover(null)}
-      className={`relative block cursor-pointer rounded-card text-left transition-opacity focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink-primary ${
-        dimmed ? "opacity-50" : ""
-      }`}
-    >
-      <Handle type="target" position={Position.Left} isConnectable={false} style={HIDDEN_HANDLE} />
-      <CourseNode
-        code={course.code}
-        title={course.title}
-        credits={`${course.credits} cr`}
-        state={course.state}
-        status={course.status}
-        blocked={course.blocked}
-        grade={course.grade}
-        selected={selected}
-      />
-      {course.badge && (
-        <span className="pointer-events-none absolute -inset-[3px] rounded-[18px] border-[2.5px] border-ink-primary" />
-      )}
-      {course.criticalPath && (
-        <span className="absolute -top-[11px] left-2">
-          <Pill tone="gold">Critical path</Pill>
-        </span>
-      )}
-      {course.badge && (
-        <span className="absolute -bottom-[14px] left-2 flex max-w-[196px] items-center gap-[5px] rounded-pill bg-ink-primary py-[3px] pl-[7px] pr-[10px] text-caption-12 text-surface-card">
-          <Image src={BADGE_ICON[course.badge.kind]} alt="" width={16} height={16} className="flex-none" />
-          <span className="truncate">{course.badge.text}</span>
-        </span>
-      )}
-      <Handle type="source" position={Position.Right} isConnectable={false} style={HIDDEN_HANDLE} />
-    </button>
-  );
+async function loadBoardData(planId: string | number): Promise<BoardData> {
+  const plan = await getPlan(planId);
+  const last = planTerms(plan, null).at(-1)!;
+  const candidate = plan.readOnly ? null : termAfter(last);
+  const terms = planTerms(plan, candidate);
+  // The plan and its prerequisites are required. The rest only enriches the board, so a failure
+  // there leaves that part out instead of failing the page.
+  const [prerequisites, extras, ...lists] = await Promise.all([
+    getPrerequisites(plan.plan.id),
+    getStudentExtras(plan.plan.studentId).catch(() => null),
+    ...terms.map((term) => getCourseOptions(plan.plan.id, term.code).catch(() => null)),
+  ]);
+  const options: Record<string, CourseOptions> = {};
+  terms.forEach((term, i) => {
+    const list = lists[i];
+    if (list) options[term.code] = list;
+  });
+  const later = candidate && options[candidate.code]?.term.open ? candidate : null;
+  return { plan, prerequisites, options, extras, later };
 }
 
-function TermFlowNode({ data }: NodeProps<Node<{ column: BoardColumn }>>) {
-  const { column } = data;
-  return (
-    <div className="flex flex-col gap-0.5 pl-1" style={{ width: column.width }}>
-      <div className="flex h-6 items-center gap-2">
-        <h2 className="text-title-18 whitespace-nowrap text-ink-primary">{column.title}</h2>
-        {column.now && <Pill tone="gold">Now</Pill>}
-        {column.where === "plan" && (
-          <span className="rounded-pill border-[1.5px] border-ink-on-gold bg-brand-gold px-2 py-px text-caption-12 text-ink-on-gold">
-            Plan
-          </span>
-        )}
-      </div>
-      <p className="text-caption-12-regular whitespace-nowrap text-ink-muted">{column.sub}</p>
-    </div>
-  );
-}
-
-// Full-height band behind a term. Terms alternate between a faint tint and none, the plan's term
-// is faint gold, and "Not yet planned" is one wide dashed region.
-const BAND = {
-  plain: "",
-  tint: "bg-surface-sunken/60",
-  plan: "border border-brand-gold/40 bg-brand-gold-soft/45",
-  unplanned: "border-[1.5px] border-dashed border-border-default bg-surface-sunken/45",
-};
-
-function BandFlowNode({ data }: NodeProps<Node<{ look: keyof typeof BAND; width: number; height: number }>>) {
-  return <div className={`rounded-panel ${BAND[data.look]}`} style={{ width: data.width, height: data.height }} />;
-}
-
-function GroupFlowNode({ data }: NodeProps<Node<{ group: BoardGroup }>>) {
-  const { group } = data;
-  return (
-    <h3 className="flex items-center gap-1.5 pl-1 text-overline-12 uppercase whitespace-nowrap text-ink-secondary">
-      <Image src={STATE_ICON[group.state]} alt="" width={16} height={16} />
-      {group.label} · {group.count}
-    </h3>
-  );
-}
-
-function AddFlowNode() {
-  return (
-    <button
-      type="button"
-      disabled
-      style={{ width: NODE_W }}
-      className="cursor-not-allowed rounded-field border-[1.5px] border-dashed border-ink-muted py-2 text-caption-12 whitespace-pre text-ink-secondary opacity-60"
-    >
-      {"+  Add course"}
-    </button>
-  );
-}
-
-// Connector that stays in the gaps between notes: out of the source into the column gap beside it,
-// along the row gap above the target, then down the column gap in front of the target and in.
-function lanePath(sx: number, sy: number, tx: number, ty: number) {
-  const outX = sx + COL_GAP / 2;
-  const inX = tx - COL_GAP / 2;
-  const laneY = ty - NODE_H / 2 - ROW_GAP / 2;
-  const raw: [number, number][] =
-    outX === inX
-      ? [[sx, sy], [outX, sy], [outX, ty], [tx, ty]]
-      : [[sx, sy], [outX, sy], [outX, laneY], [inX, laneY], [inX, ty], [tx, ty]];
-  // Drop repeated points, then round each remaining corner.
-  const points = raw.filter((p, i) => i === 0 || p[0] !== raw[i - 1][0] || p[1] !== raw[i - 1][1]);
-  let d = `M ${points[0][0]} ${points[0][1]}`;
-  for (let i = 1; i < points.length - 1; i++) {
-    const [px, py] = points[i - 1], [x, y] = points[i], [nx, ny] = points[i + 1];
-    const r = Math.min(10, Math.hypot(x - px, y - py) / 2, Math.hypot(nx - x, ny - y) / 2);
-    const ax = x - Math.sign(x - px) * r, ay = y - Math.sign(y - py) * r;
-    const bx = x + Math.sign(nx - x) * r, by = y + Math.sign(ny - y) * r;
-    d += ` L ${ax} ${ay} Q ${x} ${y} ${bx} ${by}`;
-  }
-  const last = points[points.length - 1];
-  return `${d} L ${last[0]} ${last[1]}`;
-}
-
-function LaneEdge({ sourceX, sourceY, targetX, targetY, style, markerEnd }: EdgeProps) {
-  return <BaseEdge path={lanePath(sourceX, sourceY, targetX, targetY)} style={style} markerEnd={markerEnd} />;
-}
-
-const EDGE_TYPES = { lane: LaneEdge };
-
-// Room around the fitted board. The legend and zoom control sit over the bottom edge.
-const FIT = { top: 28, side: 28, bottom: 88, minZoom: 0.5 };
-
-// Opening view: the term columns (transcript + this plan) fitted to the canvas. If that would
-// shrink the notes below half size, stay at half size and start from the top-left instead, so the
-// board opens readable and the rest is a pan away. "Not yet planned" continues to the right.
-function openingViewport(board: Board, width: number, height: number) {
-  const terms = board.columns.filter((column) => column.where !== "unplanned");
-  const right = Math.max(...terms.map((column) => column.x + column.width));
-  const bottom = Math.max(HEADER_H, ...board.courses.filter((c) => c.where !== "unplanned").map((c) => c.y + NODE_H));
-  const fit = Math.min((width - FIT.side * 2) / right, (height - FIT.top - FIT.bottom) / bottom);
-  const zoom = Math.min(1, Math.max(FIT.minZoom, fit));
-  return { x: FIT.side, y: FIT.top, zoom };
-}
-
-const NODE_TYPES = { course: CourseFlowNode, term: TermFlowNode, add: AddFlowNode, band: BandFlowNode, heading: GroupFlowNode };
-
-// How far a band reaches beyond its column: half the gap to each side, a little above and below.
-const BAND_PAD = { x: COL_GAP / 2 - 6, top: 16, bottom: 24 };
-
-// ---------------------------------------------------------------- canvas overlays
-
-const OVERLAY =
-  "flex items-center rounded-card border border-border-subtle bg-surface-card px-4 py-[10px] shadow-note";
-
-function Legend() {
-  const entries: [CourseState, string][] = [
-    ["taken", "Taken"],
-    ["in-progress", "In progress"],
-    ["available", "Available now"],
-    ["locked", "Locked"],
-    ["suggested", "Suggested"],
-  ];
-  return (
-    <Panel position="bottom-left" style={{ margin: 24, maxWidth: "calc(100% - 210px)" }}>
-      <ul className={`${OVERLAY} flex-wrap gap-x-[18px] gap-y-2`}>
-        {entries.map(([state, label]) => (
-          <li key={state} className="flex items-center gap-1.5 text-caption-12 whitespace-nowrap text-ink-secondary">
-            <Image src={STATE_ICON[state]} alt="" width={18} height={18} />
-            {label}
-          </li>
-        ))}
-        <li className="flex items-center gap-1.5 text-caption-12 whitespace-nowrap text-ink-secondary max-xl:hidden">
-          <span className="h-[3.5px] w-6 rounded-pill bg-brand-gold" />
-          Prerequisite, on hover or select
-        </li>
-      </ul>
-    </Panel>
-  );
-}
-
-function ZoomControl() {
-  const { zoomIn, zoomOut } = useReactFlow();
-  const { zoom } = useViewport();
-  const step = "cursor-pointer px-1 text-label-16 text-ink-secondary hover:text-ink-primary";
-  return (
-    <Panel position="bottom-right" style={{ margin: 24 }}>
-      <div className={`${OVERLAY} gap-[14px]`}>
-        <button type="button" aria-label="Zoom out" className={step} onClick={() => zoomOut({ duration: 150 })}>
-          −
-        </button>
-        <span className="min-w-9 text-center text-caption-12 text-ink-primary">{Math.round(zoom * 100)}%</span>
-        <button type="button" aria-label="Zoom in" className={step} onClick={() => zoomIn({ duration: 150 })}>
-          +
-        </button>
-      </div>
-    </Panel>
-  );
-}
-
-// ---------------------------------------------------------------- side panel
-
-function CourseRef({ code, board }: { code: string; board: Board }) {
-  // A course can be on the board twice (a failed attempt and its retake): describe the latest.
-  const course = board.courses.filter((c) => c.code === code).at(-1);
-  const status = !course
-    ? "Not on this board"
-    : course.state === "taken"
-      ? "Taken"
-      : course.state === "in-progress"
-        ? "In progress"
-        : course.where === "plan"
-          ? "In this plan"
-          : "Not yet planned";
-  return (
-    <li className="flex items-center gap-2 py-[7px]">
-      {course && <Image src={STATE_ICON[course.state]} alt="" width={18} height={18} className="flex-none" />}
-      <span className="flex-none text-label-14 text-ink-primary">{code}</span>
-      <span className="min-w-0 flex-1 truncate text-body-14 text-ink-secondary">{course?.title}</span>
-      {course?.grade ? (
-        <span className="flex-none rounded-pill bg-ink-primary px-[9px] py-0.5 text-caption-12 text-surface-card">
-          {course.grade}
-        </span>
-      ) : (
-        <span className="flex-none text-caption-12-regular text-ink-secondary">{status}</span>
-      )}
-    </li>
-  );
-}
-
-const time = (t: string | null) => t?.slice(0, 5) ?? "";
-
-function SelectedCourse({
-  course,
-  board,
-  prerequisites,
-  onClose,
+function Shell({
+  advisor,
+  left,
+  generate,
+  children,
 }: {
-  course: BoardCourse;
-  board: Board;
-  prerequisites: Prerequisite[];
-  onClose: () => void;
+  advisor: Advisor;
+  left?: React.ReactNode;
+  generate?: { label: string; disabled: boolean; onClick: () => void };
+  children: React.ReactNode;
 }) {
-  const groups = prerequisiteGroups(course.code, prerequisites);
-  const unlocks = unlockedBy(course.code, prerequisites);
-  const section = course.item?.section;
-
-  return (
-    <section
-      aria-label={`${course.code} details`}
-      className="flex flex-none flex-col gap-3 rounded-card border-[1.5px] border-ink-primary bg-surface-canvas px-4 py-[14px]"
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
-          <h2 className="text-title-18 whitespace-nowrap text-ink-primary">{course.code}</h2>
-          {course.state === "suggested" && <SuggestedTag />}
-          {course.criticalPath && <Pill tone="gold">Critical path</Pill>}
-        </div>
-        <div className="flex flex-none items-center">
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close course details"
-            className="cursor-pointer rounded-pill focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary"
-          >
-            <Image src="/advisor/close.svg" alt="" width={28} height={28} />
-          </button>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-0.5">
-        <p className="text-body-14 text-ink-primary">
-          {course.title} · {course.termLabel} · {course.credits} cr
-        </p>
-        {course.fills && <p className="text-caption-12-regular text-ink-secondary">Fills: {course.fills}</p>}
-      </div>
-
-      {course.item && (
-        <div className="flex flex-wrap gap-2">
-          <Button variant="gold" size="sm" full={false} disabled>
-            Confirm
-          </Button>
-          <Button variant="secondary" size="sm" full={false} disabled>
-            Swap
-          </Button>
-          <Button variant="secondary" size="sm" full={false} disabled>
-            Remove
-          </Button>
-        </div>
-      )}
-
-      {course.item?.reason && (
-        <div className="flex flex-col gap-1">
-          <h3 className={LABEL}>Why this course</h3>
-          <p className="text-body-14 text-ink-primary">{course.item.reason}</p>
-        </div>
-      )}
-
-      {section && (
-        <div className="flex flex-col gap-1">
-          <h3 className={LABEL}>Section</h3>
-          <p className="text-body-14 text-ink-primary">
-            {[
-              section.section_code && `Section ${section.section_code}`,
-              section.days?.length ? `${section.days.join(" ")} ${time(section.start_time)}–${time(section.end_time)}` : null,
-              section.modality,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-          <p className="text-caption-12-regular text-ink-secondary">
-            {[
-              section.instructor && `Instructor: ${section.instructor}`,
-              section.seats_open !== null &&
-                section.capacity !== null &&
-                `${section.seats_open} of ${section.capacity} seats open`,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-        </div>
-      )}
-
-      {course.item && course.item.issues.length > 0 && (
-        <div className="flex flex-col gap-1">
-          <h3 className={LABEL}>Issues</h3>
-          <ul className="flex flex-col gap-1 text-body-14 text-ink-primary">
-            {course.item.issues.map((issue, i) => (
-              <li key={i}>{issue.message}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="flex flex-col">
-        <div className="flex items-center justify-between pb-1">
-          <h3 className={LABEL}>Prerequisites</h3>
-        </div>
-        {groups.length === 0 ? (
-          <p className="text-body-14 text-ink-secondary">None listed.</p>
-        ) : (
-          groups.map((group, i) => (
-            <div key={i} className="border-t border-border-subtle">
-              {(group.codes.length > 1 || group.kind === "coreq") && (
-                <p className="pt-[7px] text-caption-12-regular text-ink-secondary">
-                  {group.kind === "coreq" ? "Corequisite" : "One of"}
-                </p>
-              )}
-              <ul>
-                {group.codes.map((code) => (
-                  <CourseRef key={code} code={code} board={board} />
-                ))}
-              </ul>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <h3 className={LABEL}>Unlocks</h3>
-          {unlocks.length > 0 && (
-            <span className="text-caption-12-regular text-ink-secondary">
-              {unlocks.length} {unlocks.length === 1 ? "course" : "courses"}
-            </span>
-          )}
-        </div>
-        {unlocks.length === 0 ? (
-          <p className="text-body-14 text-ink-secondary">Nothing listed.</p>
-        ) : (
-          <ul className="flex flex-wrap gap-1.5">
-            {unlocks.map((code) => (
-              <li
-                key={code}
-                className="rounded-pill border-[1.5px] border-border-default bg-surface-card px-[10px] py-[3px] text-caption-12 text-ink-primary"
-              >
-                {code}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function PlanPanel({
-  plan,
-  board,
-  prerequisites,
-  selected,
-  onSelect,
-}: {
-  plan: PlanResponse;
-  board: Board;
-  prerequisites: Prerequisite[];
-  selected: BoardCourse | null;
-  onSelect: (id: string | null) => void;
-}) {
-  const { credits, target, courses } = plan.totals;
-  const planned = board.courses.filter((c) => c.where === "plan");
-
-  return (
-    <aside
-      aria-label="Plan details"
-      className="my-3 mr-4 flex w-[368px] flex-none flex-col gap-[22px] overflow-y-auto rounded-panel border border-border-subtle bg-surface-card p-5 shadow-panel short:gap-4 short:p-4 max-md:hidden"
-    >
-      {selected && (
-        <SelectedCourse course={selected} board={board} prerequisites={prerequisites} onClose={() => onSelect(null)} />
-      )}
-
-      <section className="flex flex-none flex-col gap-[10px]">
-        <h2 className={LABEL}>Why this plan</h2>
-        <p className="text-body-14 text-ink-primary">{plan.plan.rationale ?? "No rationale was recorded for this plan."}</p>
-        <p className="text-caption-12-regular text-ink-secondary">
-          {plan.plan.createdBy === "ai" ? "Drafted by AI" : "Created by an advisor"}
-          {plan.plan.modelName ? ` · ${plan.plan.modelName}` : ""}
-        </p>
-      </section>
-
-      <section className="flex flex-none flex-col gap-[10px]">
-        <h2 className={LABEL}>Credits per term</h2>
-        <div className="flex items-center gap-[10px]">
-          <span className="w-[92px] flex-none text-body-14 text-ink-primary">{plan.term.name}</span>
-          <span className="h-2 min-w-0 flex-1 overflow-clip rounded-pill border border-border-default bg-surface-sunken">
-            <span
-              className="block h-full bg-ink-primary"
-              style={{ width: `${target > 0 ? Math.min(100, (credits / target) * 100) : 0}%` }}
-            />
-          </span>
-          <span className="flex-none text-label-14 whitespace-nowrap text-ink-primary">{credits} cr</span>
-        </div>
-        <p className="text-caption-12-regular text-ink-secondary">Target: {target} cr</p>
-        {plan.issues.length > 0 && (
-          <ul className="flex flex-col gap-1 text-body-14 text-ink-primary">
-            {plan.issues.map((issue, i) => (
-              <li key={i}>{issue.message}</li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="flex flex-none flex-col gap-[10px]">
-        <div className="flex items-center justify-between">
-          <h2 className={LABEL}>Courses in this plan</h2>
-          <span className="text-caption-12-regular whitespace-nowrap text-ink-secondary">
-            {courses} {courses === 1 ? "course" : "courses"} · {credits} cr
-          </span>
-        </div>
-        {planned.length === 0 ? (
-          <p className="text-body-14 text-ink-secondary">This plan has no courses yet.</p>
-        ) : (
-          <ul className="flex flex-wrap gap-1.5">
-            {planned.map((c) => (
-              <li key={c.id}>
-                <button
-                  type="button"
-                  aria-pressed={selected?.id === c.id}
-                  onClick={() => onSelect(c.id)}
-                  className={`flex cursor-pointer items-center gap-[5px] rounded-pill border-[1.5px] py-[3px] pr-[10px] text-caption-12 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary ${
-                    c.badge
-                      ? "border-ink-primary bg-ink-primary pl-[7px] text-surface-card"
-                      : c.state === "suggested"
-                        ? "border-brand-gold bg-brand-gold-soft pl-[7px] text-ink-primary"
-                        : "border-border-default bg-surface-card pl-[10px] text-ink-primary"
-                  }`}
-                >
-                  {c.badge ? (
-                    <Image src={BADGE_ICON[c.badge.kind]} alt="" width={16} height={16} />
-                  ) : (
-                    c.state === "suggested" && <Image src="/plan/suggested.svg" alt="" width={16} height={16} />
-                  )}
-                  {c.code}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </aside>
-  );
-}
-
-// ---------------------------------------------------------------- page
-
-function BoardCanvas({
-  board,
-  selectedId,
-  onSelect,
-}: {
-  board: Board;
-  selectedId: string | null;
-  onSelect: (id: string | null) => void;
-}) {
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-
-  const nodes = useMemo(() => {
-    const linked = board.edges.filter((e) => e.source === selectedId || e.target === selectedId);
-    const related = new Set(linked.flatMap((e) => [e.source, e.target]));
-    const backdrop = { selectable: false, focusable: false, style: { pointerEvents: "none" as const } };
-    let terms = 0;
-
-    const nodes: Node[] = [
-      ...board.columns.map((column) => ({
-        ...backdrop,
-        id: `band:${column.id}`,
-        type: "band",
-        zIndex: -1,
-        position: { x: column.x - BAND_PAD.x, y: -BAND_PAD.top },
-        data: {
-          look: column.where === "term" ? (terms++ % 2 === 0 ? "tint" : "plain") : column.where,
-          width: column.width + BAND_PAD.x * 2,
-          height: board.bottom + BAND_PAD.top + BAND_PAD.bottom,
-        },
-      })),
-      ...board.columns.map((column) => ({
-        ...backdrop,
-        id: column.id,
-        type: "term",
-        position: { x: column.x, y: 0 },
-        width: column.width,
-        height: HEADER_H,
-        data: { column },
-      })),
-      ...board.columns.flatMap((column) =>
-        (column.groups ?? []).map((group) => ({
-          ...backdrop,
-          id: `group:${group.state}`,
-          // Not "group": React Flow reserves that type name and draws a box around it.
-          type: "heading",
-          // In the gap between the region header and the first row of notes.
-          position: { x: group.x, y: HEADER_H + 8 },
-          data: { group },
-        })),
-      ),
-      ...board.columns
-        .filter((column) => column.addY !== undefined)
-        .map((column) => ({
-          id: `add:${column.id}`,
-          type: "add",
-          position: { x: column.x, y: column.addY! },
-          data: {},
-          selectable: false,
-        })),
-      ...board.courses.map((course) => ({
-        id: course.id,
-        type: "course",
-        position: { x: course.x, y: course.y },
-        width: NODE_W,
-        height: NODE_H,
-        data: {
-          course,
-          selected: course.id === selectedId,
-          dimmed: selectedId !== null && course.id !== selectedId && !related.has(course.id),
-          onSelect,
-          onHover: setHoveredId,
-        },
-      })),
-    ];
-    return nodes;
-  }, [board, selectedId, onSelect]);
-
-  // Connectors stay hidden until a course is hovered, focused or selected. Then that course's
-  // prerequisite and unlock connectors show in gold, with an arrowhead at the course that needs
-  // the other.
-  const edges = useMemo(
-    (): Edge[] =>
-      board.edges.map((e) => ({
-        ...e,
-        type: "lane",
-        focusable: false,
-        selectable: false,
-        hidden: ![e.source, e.target].some((id) => id === selectedId || id === hoveredId),
-        zIndex: 1,
-        style: { stroke: "var(--color-brand-gold)", strokeWidth: 3.5 },
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          color: "var(--color-brand-gold)",
-          markerUnits: "userSpaceOnUse",
-          width: 18,
-          height: 18,
-        },
-      })),
-    [board, selectedId, hoveredId],
-  );
-
-  return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      nodeTypes={NODE_TYPES}
-      edgeTypes={EDGE_TYPES}
-      nodesDraggable={false}
-      nodesConnectable={false}
-      nodesFocusable={false}
-      edgesFocusable={false}
-      elementsSelectable={false}
-      zoomOnDoubleClick={false}
-      minZoom={0.2}
-      maxZoom={1.5}
-      onInit={(flow) => {
-        const pane = document.querySelector<HTMLElement>(".react-flow");
-        if (pane) flow.setViewport(openingViewport(board, pane.clientWidth, pane.clientHeight));
-      }}
-      attributionPosition="bottom-center"
-      onPaneClick={() => onSelect(null)}
-    >
-      <Legend />
-      <ZoomControl />
-    </ReactFlow>
-  );
-}
-
-function Shell({ advisor, left, children }: { advisor: Advisor; left?: React.ReactNode; children: React.ReactNode }) {
   return (
     <main className="flex h-dvh min-h-[420px] flex-col bg-surface-canvas text-ink-primary">
       <TopBar
@@ -707,9 +127,17 @@ function Shell({ advisor, left, children }: { advisor: Advisor; left?: React.Rea
           </>
         }
       >
-        <Button variant="secondary" size="sm" full={false} disabled className="max-lg:hidden">
-          Generate draft plan
+        <Button
+          variant="secondary"
+          size="sm"
+          full={false}
+          disabled={!generate || generate.disabled}
+          onClick={generate?.onClick}
+          className="max-lg:hidden"
+        >
+          {generate?.label ?? "Generate draft plan"}
         </Button>
+        {/* Approval and overrides come in the next pass. */}
         <Button size="sm" full={false} disabled className="max-lg:hidden">
           Approve plan
         </Button>
@@ -721,27 +149,34 @@ function Shell({ advisor, left, children }: { advisor: Advisor; left?: React.Rea
 }
 
 export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advisor }) {
+  const router = useRouter();
   const validId = /^[1-9]\d*$/.test(planId);
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Editing state. `busy` is true while any request that changes the plan is in flight.
+  const [busy, setBusy] = useState(false);
+  const [dialog, setDialog] = useState<Dialog>(null);
+  const [dependents, setDependents] = useState<Dependents>({ status: "loading" });
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [editError, setEditError] = useState<EditError | null>(null);
+  const [noteErrors, setNoteErrors] = useState<Record<string, string>>({});
+  const [pickerError, setPickerError] = useState<PickerError | null>(null);
+  const [pickerBusyId, setPickerBusyId] = useState<number | null>(null);
+  const [generation, setGeneration] = useState<Generation>({ status: "idle" });
+  const generating = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!validId) return;
     let cancelled = false;
     (async () => {
       try {
-        const plan = await getJson<PlanResponse>(`/api/plans/${planId}`);
-        const [student, edges] = await Promise.all([
-          getJson<StudentResponse>(`/api/students/${plan.plan.studentId}`),
-          getJson<{ prerequisites: Prerequisite[] }>(`/api/plans/${planId}/prerequisites`),
-        ]);
-        if (!cancelled) setLoad({ status: "ready", plan, student, prerequisites: edges.prerequisites });
+        const data = await loadBoardData(planId);
+        if (!cancelled) setLoad({ status: "ready", data });
       } catch (e) {
         if (cancelled) return;
-        setLoad(
-          e instanceof FetchError && e.status === 404 ? { status: "missing" } : { status: "error", reason: reasonOf(e) },
-        );
+        setLoad(codeOf(e) === "plan_not_found" ? { status: "missing" } : { status: "error", reason: explain(e) });
       }
     })();
     return () => {
@@ -749,10 +184,22 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
     };
   }, [planId, validId, attempt]);
 
-  const board = useMemo(
-    () => (load.status === "ready" ? buildBoard(load.plan, load.student, load.prerequisites) : null),
-    [load],
-  );
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 7000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const board = useMemo(() => {
+    if (load.status !== "ready") return null;
+    const { plan, options, prerequisites, extras, later } = load.data;
+    return buildBoard(plan, options, prerequisites, extras, later);
+  }, [load]);
+
+  const openPicker = useCallback((termCode: string) => {
+    setPickerError(null);
+    setDialog((current) => current ?? { kind: "picker", term: { code: termCode, name: termCode } });
+  }, []);
 
   if (!validId || load.status === "missing") {
     return (
@@ -790,7 +237,7 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
             </Button>
           }
         >
-          We couldn&rsquo;t load this plan because {load.reason}.
+          We couldn&rsquo;t load this plan. {load.reason}
         </StateMessage>
       </Shell>
     );
@@ -819,12 +266,199 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
     );
   }
 
-  const { plan, student, prerequisites } = load;
+  const { plan, prerequisites, options, later } = load.data;
+  const numericId = plan.plan.id;
+  const terms = planTerms(plan, later);
+  const firstName = plan.plan.studentName.trim().split(/\s+/)[0];
   const selected = board.courses.find((c) => c.id === selectedId) ?? null;
+  const isGenerating = generation.status === "running";
+  const frozen = busy || plan.readOnly;
+
+  // ---- changing the plan
+
+  // Runs one change, then reloads the board from the API so totals and the summary are current.
+  // Returns the API's refusal, or null if the change went through.
+  async function change(action: () => Promise<unknown>): Promise<PlanApiError | null> {
+    setBusy(true);
+    setToast(null);
+    setEditError(null);
+    setNoteErrors({});
+    try {
+      await action();
+    } catch (e) {
+      setBusy(false);
+      return e instanceof PlanApiError ? e : new PlanApiError("server_error");
+    }
+    try {
+      setLoad({ status: "ready", data: await loadBoardData(numericId) });
+    } catch (e) {
+      // The change was saved but the board could not be re-read: show the load error with a retry.
+      setLoad({ status: "error", reason: explain(e) });
+    }
+    setBusy(false);
+    return null;
+  }
+
+  function refused(course: CourseRef, error: EditError) {
+    if (course.nodeId) setNoteErrors({ [course.nodeId]: error.message });
+    setEditError(error);
+  }
+
+  async function add(course: CourseRef, term: TermRef) {
+    const error = await change(() => addCourse(numericId, course.courseId, term.code, advisor.id));
+    if (error) {
+      const next = error.suggestedTerm;
+      return refused(course, {
+        title: `Can’t add ${course.code} to ${term.name}`,
+        message: error.message,
+        action: next && next.code !== term.code ? { label: `Add to ${next.name}`, onClick: () => add(course, next) } : undefined,
+      });
+    }
+    setSelectedId(`plan:${course.code}`);
+    // Undo after an add is a remove.
+    setToast({ message: `${course.code} added to ${term.name}`, undo: () => remove(course, term.name, false) });
+  }
+
+  async function addFromPicker(course: CourseRef, term: TermRef) {
+    setPickerError(null);
+    setPickerBusyId(course.courseId);
+    const error = await change(() => addCourse(numericId, course.courseId, term.code, advisor.id));
+    setPickerBusyId(null);
+    if (error) {
+      const next = error.suggestedTerm;
+      return setPickerError({
+        courseId: course.courseId,
+        message: error.message,
+        suggestedTerm: next && next.code !== term.code ? next : null,
+      });
+    }
+    setDialog(null);
+    setSelectedId(`plan:${course.code}`);
+    setToast({ message: `${course.code} added to ${term.name}`, undo: () => remove(course, term.name, false) });
+  }
+
+  async function move(course: CourseRef, from: TermRef | null, to: TermRef, undoable = true) {
+    const error = await change(() => moveCourse(numericId, course.courseId, to.code, advisor.id));
+    if (error) {
+      const next = error.suggestedTerm;
+      return refused(course, {
+        title: `Can’t move ${course.code} to ${to.name}`,
+        message: error.message,
+        action:
+          next && next.code !== to.code && next.code !== from?.code
+            ? { label: `Move to ${next.name}`, onClick: () => move(course, from, next) }
+            : undefined,
+      });
+    }
+    setToast({
+      message: `${course.code} moved to ${to.name}`,
+      undo: undoable && from ? () => move(course, to, from, false) : undefined,
+    });
+  }
+
+  async function remove(course: CourseRef, termName: string, undoable = true) {
+    const error = await change(() => removeCourse(numericId, course.courseId, advisor.id));
+    setDialog(null);
+    if (error) return refused(course, { title: `Can’t remove ${course.code}`, message: error.message });
+    if (selectedId === `plan:${course.code}`) setSelectedId(null);
+    setToast({ message: `${course.code} removed from ${termName}`, undo: undoable ? () => restore(course) : undefined });
+  }
+
+  async function restore(course: CourseRef) {
+    const error = await change(() => restoreCourse(numericId, course.courseId, advisor.id));
+    if (error) return setEditError({ title: `Can’t bring ${course.code} back`, message: error.message });
+    setToast({ message: `${course.code} is back in the plan` });
+  }
+
+  async function confirm(course: BoardCourse) {
+    const error = await change(() => confirmCourse(numericId, course.courseId, advisor.id));
+    if (error) return refused({ ...course, nodeId: course.id }, { title: `Can’t confirm ${course.code}`, message: error.message });
+    setToast({ message: `${course.code} confirmed` });
+  }
+
+  async function swap(course: BoardCourse, alternative: Alternative) {
+    const error = await change(() => swapCourse(numericId, course.courseId, alternative.courseId, advisor.id));
+    if (error) {
+      return refused(
+        { ...course, nodeId: course.id },
+        { title: `Can’t swap ${course.code} for ${alternative.code}`, message: error.message },
+      );
+    }
+    setSelectedId(`plan:${alternative.code}`);
+    setToast({ message: `${alternative.code} swapped in for ${course.code}` });
+  }
+
+  // A note was dropped on one of its target bands. `missing` is what the board already knows the
+  // course still needs for that term; when it is not empty nothing is sent.
+  function drop(course: BoardCourse, column: BoardColumn, missing: string[]) {
+    const ref = { courseId: course.courseId, code: course.code, nodeId: course.id };
+    if (missing.length > 0) {
+      const fits = terms.find((term) => course.fit[term.code]?.met);
+      return refused(ref, {
+        title: `Can’t add ${course.code} to ${column.title} yet`,
+        message: `${course.code} needs ${missing.join(" and ")} first.`,
+        action: fits ? { label: `Add to ${fits.name}`, onClick: () => add(ref, fits) } : undefined,
+      });
+    }
+    if (column.where === "unplanned") return openRemove(course);
+    const term = { code: column.termCode!, name: column.title };
+    if (course.drag === "unplanned") return void add(ref, term);
+    void move(ref, course.termCode ? { code: course.termCode, name: course.termLabel } : null, term);
+  }
+
+  function openRemove(course: BoardCourse) {
+    setDialog({ kind: "remove", course });
+    setDependents({ status: "loading" });
+    getDependents(numericId, course.courseId).then(
+      (list) => setDependents({ status: "ready", list }),
+      () => setDependents({ status: "unknown" }),
+    );
+  }
+
+  // ---- generating a draft
+
+  async function generate(replace: boolean) {
+    const controller = new AbortController();
+    generating.current = controller;
+    setDialog(null);
+    setBusy(true);
+    setToast(null);
+    setEditError(null);
+    setNoteErrors({});
+    setGeneration({ status: "running" });
+    try {
+      const created = await generatePlan(plan.plan.studentId, advisor.id, replace, controller.signal);
+      // A new draft is a new plan with its own id. `busy` stays on until that page takes over.
+      router.replace(`/plans/${created.plan.id}${window.location.search}`);
+      return;
+    } catch (e) {
+      const error = e instanceof PlanApiError ? e : new PlanApiError("server_error");
+      if (error.code === "plan_exists" && error.existing) {
+        setGeneration({ status: "idle" });
+        setDialog({ kind: "generate", planId: error.existing.planId, status: error.existing.status });
+      } else if (error.code === "cancelled") {
+        setGeneration({ status: "idle" });
+      } else {
+        const retryable = !["plan_approved", "no_candidates", "student_not_found"].includes(error.code);
+        const lead = error.code === "plan_approved" ? "" : "Couldn’t generate a draft plan. ";
+        setGeneration({ status: "failed", message: `${lead}${error.message}`, retry: retryable ? () => generate(replace) : null });
+      }
+      setBusy(false);
+    }
+  }
+
+  const pickerTerm = dialog?.kind === "picker" ? (terms.find((t) => t.code === dialog.term.code) ?? dialog.term) : null;
+  const edited = new Date(plan.plan.updatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const planned = plan.terms.filter((t) => t.state === "planned");
 
   return (
     <Shell
       advisor={advisor}
+      generate={{
+        label: isGenerating ? "Generating…" : "Generate draft plan",
+        disabled: busy,
+        onClick: () => generate(false),
+      }}
       left={
         <>
           <span className="h-7 w-[1.5px] flex-none bg-border-subtle" />
@@ -833,7 +467,7 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
             <span className="flex min-w-0 flex-col">
               <span className="truncate text-label-16 text-ink-primary">{plan.plan.studentName}</span>
               <span className="truncate text-caption-12-regular text-ink-secondary">
-                {[plan.plan.programName, student.student.expected_graduation].filter(Boolean).join(" · ")}
+                {[plan.plan.programName, load.data.extras?.expectedGraduation].filter(Boolean).join(" · ")}
               </span>
             </span>
           </span>
@@ -841,10 +475,98 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
         </>
       }
     >
-      <div className="relative min-w-0 flex-1">
-        <BoardCanvas board={board} selectedId={selectedId} onSelect={setSelectedId} />
+      <div className="relative min-w-0 flex-1" aria-busy={busy}>
+        <BoardCanvas
+          board={board}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          locked={frozen}
+          noteErrors={noteErrors}
+          onAdd={openPicker}
+          onDrop={drop}
+        />
+        {isGenerating ? (
+          <GeneratingBanner onCancel={() => generating.current?.abort()} />
+        ) : generation.status === "failed" ? (
+          <NoticeBanner
+            message={generation.message}
+            onRetry={generation.retry ?? undefined}
+            onDismiss={() => setGeneration({ status: "idle" })}
+          />
+        ) : (
+          toast && <Toast message={toast.message} undo={toast.undo && { disabled: busy, onClick: toast.undo }} />
+        )}
       </div>
-      <PlanPanel plan={plan} board={board} prerequisites={prerequisites} selected={selected} onSelect={setSelectedId} />
+
+      {isGenerating ? (
+        <PlanPanelSkeleton />
+      ) : (
+        <PlanPanel
+          plan={plan}
+          board={board}
+          prerequisites={prerequisites}
+          selected={selected}
+          busy={busy}
+          terms={terms}
+          editError={editError}
+          onDismissError={() => {
+            setEditError(null);
+            setNoteErrors({});
+          }}
+          onSelect={setSelectedId}
+          onAdd={(course, term) => add({ courseId: course.courseId, code: course.code, nodeId: course.id }, term)}
+          onMove={(course, term) =>
+            move(
+              { courseId: course.courseId, code: course.code, nodeId: course.id },
+              course.termCode ? { code: course.termCode, name: course.termLabel } : null,
+              term,
+            )
+          }
+          onConfirm={confirm}
+          onSwap={swap}
+          onRemove={openRemove}
+        />
+      )}
+
+      {dialog?.kind === "generate" && (
+        <GenerateDialog
+          firstName={firstName}
+          status={dialog.status}
+          isThisPlan={dialog.planId === numericId}
+          summary={
+            dialog.planId === numericId
+              ? `last edited ${edited}, with ${plan.totals.courses} ${plan.totals.courses === 1 ? "course" : "courses"} ${
+                  planned.length === 1 ? `in ${planned[0].name}` : `across ${planned.length} terms`
+                }`
+              : null
+          }
+          onOpenExisting={() => router.push(`/plans/${dialog.planId}${window.location.search}`)}
+          onGenerate={() => generate(true)}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "remove" && (
+        <RemoveDialog
+          code={dialog.course.code}
+          termName={dialog.course.termLabel}
+          dependents={dependents}
+          busy={busy}
+          onCancel={() => setDialog(null)}
+          onRemove={() =>
+            remove({ courseId: dialog.course.courseId, code: dialog.course.code, nodeId: dialog.course.id }, dialog.course.termLabel)
+          }
+        />
+      )}
+      {pickerTerm && (
+        <CoursePicker
+          options={options[pickerTerm.code] ?? null}
+          busyId={pickerBusyId}
+          error={pickerError}
+          onAdd={(course) => addFromPicker(course, pickerTerm)}
+          onAddTo={(course, term) => addFromPicker(course, term)}
+          onClose={() => setDialog(null)}
+        />
+      )}
     </Shell>
   );
 }
