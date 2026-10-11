@@ -8,67 +8,9 @@ import { auth } from "../../lib/firebase";
 import { useRouter } from "next/navigation";
 import { TopBar } from "@/components/TopBar";
 import { Button } from "@/components/Button";
+import { CourseNode } from "@/components/CourseNode";
 
 type Role = "student" | "advisor";
-
-type CourseState = "taken" | "in-progress" | "available" | "locked";
-
-const COURSE_STYLES: Record<CourseState, { box: string; icon: string }> = {
-  taken: {
-    box: "border-[1.5px] border-border-default bg-surface-card shadow-note",
-    icon: "/login/icon-taken.svg",
-  },
-  "in-progress": {
-    box: "border-[2.5px] border-ink-primary bg-surface-card shadow-note",
-    icon: "/login/icon-in-progress.svg",
-  },
-  available: {
-    box: "border-[2.5px] border-brand-gold bg-brand-gold-soft shadow-note-lifted",
-    icon: "/login/icon-available.svg",
-  },
-  locked: {
-    box: "border-[1.5px] border-dashed border-ink-secondary bg-surface-sunken",
-    icon: "/login/icon-locked.svg",
-  },
-};
-
-function CourseNode({
-  code,
-  title,
-  status,
-  state,
-  grade,
-  credits = "3 cr",
-}: {
-  code: string;
-  title: string;
-  status: string;
-  state: CourseState;
-  grade?: string;
-  credits?: string;
-}) {
-  const locked = state === "locked";
-  const tone = locked ? "text-ink-secondary" : "text-ink-primary";
-
-  return (
-    <div className={`flex h-[108px] w-[208px] flex-col justify-between rounded-card px-4 py-[14px] ${COURSE_STYLES[state].box}`}>
-      <div className="flex items-center justify-between whitespace-nowrap">
-        <p className={`text-label-16 ${tone}`}>{code}</p>
-        <p className={`text-caption-12-regular ${locked ? "text-ink-secondary" : "text-ink-muted"}`}>{credits}</p>
-      </div>
-      <p className="truncate text-body-13 text-ink-secondary">{title}</p>
-      <div className="flex min-h-[30px] items-center justify-between pt-1.5">
-        <div className="flex items-center gap-1.5">
-          <Image src={COURSE_STYLES[state].icon} alt="" width={18} height={18} />
-          <p className={`whitespace-nowrap text-caption-12 ${tone}`}>{status}</p>
-        </div>
-        {grade && (
-          <span className="rounded-pill bg-ink-primary px-[9px] py-0.5 text-caption-12 text-surface-card">{grade}</span>
-        )}
-      </div>
-    </div>
-  );
-}
 
 function StickyNote({ tone, children }: { tone: string; children: React.ReactNode }) {
   return (
@@ -147,12 +89,12 @@ function BackgroundArt() {
         </div>
         <div className={`${ART_PIECE} left-[55.299%] top-[18.004%]`}>
           <div className="-rotate-6">
-            <CourseNode code="COP 3502" title="Computer Science I" status="Taken" state="taken" grade="A-" />
+            <CourseNode credits="3 cr" code="COP 3502" title="Computer Science I" status="Taken" state="taken" grade="A-" />
           </div>
         </div>
         <div className={`${ART_PIECE} left-[69.139%] top-[64.881%]`}>
           <div className="rotate-5">
-            <CourseNode code="COP 3503" title="Computer Science II" status="In progress" state="in-progress" />
+            <CourseNode credits="3 cr" code="COP 3503" title="Computer Science II" status="In progress" state="in-progress" />
           </div>
         </div>
       </div>
@@ -182,12 +124,12 @@ function BackgroundArt() {
         </div>
         <div className={`${ART_PIECE} left-[41.051%] top-[24.435%]`}>
           <div className="rotate-6">
-            <CourseNode code="CIS 3360" title="Security in Computing" status="Available now" state="available" />
+            <CourseNode credits="3 cr" code="CIS 3360" title="Security in Computing" status="Available now" state="available" />
           </div>
         </div>
         <div className={`${ART_PIECE} left-[32.643%] top-[67.356%]`}>
           <div className="-rotate-4">
-            <CourseNode code="COP 4331" title="OO Software Development" status="Needs COP 3503" state="locked" />
+            <CourseNode credits="3 cr" code="COP 4331" title="OO Software Development" status="Needs COP 3503" state="locked" />
           </div>
         </div>
       </div>
