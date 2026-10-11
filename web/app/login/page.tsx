@@ -1,28 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, type FormEvent } from "react";
 import Image from "next/image";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { getDatabase, ref, get } from "firebase/database";
 import { auth } from "../../lib/firebase";
 import { useRouter } from "next/navigation";
 
 type Role = "student" | "advisor";
-
-// Row shape from GET /api/advisors
-type Advisor = {
-  id: number;
-  name: string;
-  email: string | null;
-  department: string | null;
-  students: number;
-};
-
-function initialsOf(name: string) {
-  const parts = name.replace(/^(Dr|Prof|Mr|Mrs|Ms)\.?\s+/i, "").trim().split(/\s+/);
-  const first = parts[0]?.[0] ?? "";
-  const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
-  return (first + last).toUpperCase();
-}
 
 type CourseState = "taken" | "in-progress" | "available" | "locked";
 
@@ -211,12 +196,14 @@ function BackgroundArt() {
 function RoleCard({
   selected,
   onClick,
+  disabled,
   icon,
   title,
   sub,
 }: {
   selected: boolean;
   onClick: () => void;
+  disabled: boolean;
   icon: string;
   title: string;
   sub: string;
@@ -226,7 +213,8 @@ function RoleCard({
       type="button"
       aria-pressed={selected}
       onClick={onClick}
-      className={`flex min-w-0 flex-1 cursor-pointer flex-col items-start gap-[14px] rounded-role-card px-[22px] pb-[22px] pt-5 text-left short:gap-2 short:pb-[14px] short:pt-[14px] transition-transform hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary ${
+      disabled={disabled}
+      className={`flex min-w-0 flex-1 cursor-pointer flex-col items-start gap-[14px] rounded-role-card px-[22px] pb-[22px] pt-5 text-left short:gap-2 short:pb-[14px] short:pt-[14px] transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:hover:translate-y-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary ${
         selected
           ? "border-3 border-brand-gold bg-brand-gold-soft shadow-note-lifted"
           : "border-[1.5px] border-border-default bg-surface-card shadow-note hover:border-ink-muted"
@@ -255,21 +243,17 @@ const PRIMARY_BUTTON =
   "w-full cursor-pointer rounded-pill bg-ink-primary px-[22px] py-3 text-label-14 text-surface-card transition-colors hover:bg-brand-gold hover:text-ink-on-gold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:bg-ink-primary disabled:hover:text-surface-card";
 
 const INPUT =
-  "w-full rounded-field border-[1.5px] border-ink-muted bg-surface-card px-[14px] py-3 text-body-14 text-ink-primary outline-none transition-shadow placeholder:text-ink-muted focus:border-brand-gold focus:ring-4 focus:ring-brand-gold/25";
+  "w-full disabled:cursor-not-allowed disabled:opacity-70 rounded-field border-[1.5px] border-ink-muted bg-surface-card px-[14px] py-3 text-body-14 text-ink-primary outline-none transition-shadow placeholder:text-ink-muted focus:border-brand-gold focus:ring-4 focus:ring-brand-gold/25";
 
-// Error / empty / loading message inside the panel. No error colour exists in the tokens,
-// so the state is carried by the badge, border and wording.
-function PanelNote({ role, alert = false, children }: { role: "alert" | "status"; alert?: boolean; children: React.ReactNode }) {
+// Error message inside the panel. No error colour exists in the tokens, so the state is
+// carried by the badge, border and wording.
+function ErrorNote({ children }: { children: React.ReactNode }) {
   return (
     <div
-      role={role}
-      className={`flex w-full items-center gap-2.5 rounded-row bg-surface-sunken py-[10px] pl-3 pr-[14px] text-body-13 ${
-        alert ? "border-[1.5px] border-ink-primary text-ink-primary" : "border-[1.5px] border-dashed border-border-default text-ink-secondary"
-      }`}
+      role="alert"
+      className="flex w-full items-center gap-2.5 rounded-row border-[1.5px] border-ink-primary bg-surface-sunken py-[10px] pl-3 pr-[14px] text-body-13 text-ink-primary"
     >
-      {alert && (
-        <span className="flex size-[18px] flex-none items-center justify-center rounded-pill bg-ink-primary text-caption-12 text-surface-card">!</span>
-      )}
+      <span className="flex size-[18px] flex-none items-center justify-center rounded-pill bg-ink-primary text-caption-12 text-surface-card">!</span>
       <span>{children}</span>
     </div>
   );
@@ -278,72 +262,131 @@ function PanelNote({ role, alert = false, children }: { role: "alert" | "status"
 export default function LoginPage() {
   const router = useRouter();
 
-  const [role, setRole] = useState<Role>("advisor");
-  const [advisors, setAdvisors] = useState<Advisor[]>([]);
-  const [advisorsLoading, setAdvisorsLoading] = useState(true);
-  const [advisorsError, setAdvisorsError] = useState("");
-  const [advisorsReload, setAdvisorsReload] = useState(0);
-  const [advisorId, setAdvisorId] = useState<number | null>(null);
-
+  const [role, setRole] = useState<Role>("student");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const selectedAdvisor = advisors.find((a) => a.id === advisorId) ?? advisors[0] ?? null;
+  function selectRole(nextRole: Role) {
+    if (loading) return;
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadAdvisors() {
-      try {
-        const res = await fetch("/api/advisors");
-        const data = await res.json().catch(() => null);
-        if (!res.ok || !Array.isArray(data?.advisors)) {
-          throw new Error(data?.error ?? `Request failed (${res.status})`);
-        }
-        if (cancelled) return;
-        setAdvisors(data.advisors);
-        setAdvisorsError("");
-      } catch (err) {
-        console.error(err);
-        if (!cancelled) setAdvisorsError("Couldn't load the advisor list.");
-      } finally {
-        if (!cancelled) setAdvisorsLoading(false);
-      }
-    }
-
-    loadAdvisors();
-    return () => {
-      cancelled = true;
-    };
-  }, [advisorsReload]);
-
-  function retryAdvisors() {
-    setAdvisorsError("");
-    setAdvisorsLoading(true);
-    setAdvisorsReload((n) => n + 1);
+    setRole(nextRole);
+    setError("");
+    setPassword("");
   }
 
-  async function handleLogin(e: React.FormEvent<HTMLFormElement>) {
+  async function handleLogin(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    if (loading) return;
+
     setError("");
     setLoading(true);
 
+    const selectedRole = role;
+    let authenticated = false;
+
     try {
-      await signInWithEmailAndPassword(auth, email, password);
-      router.push("/dashboard");
-    } catch (err) {
+      const credential = await signInWithEmailAndPassword(
+        auth,
+        email.trim(),
+        password
+      );
+
+      authenticated = true;
+
+      const db = getDatabase(
+        auth.app,
+        "https://tasseltrak-69d99-default-rtdb.firebaseio.com"
+      );
+
+      const snapshot = await get(
+        ref(db, `users/${credential.user.uid}/role`)
+      );
+
+      const savedRole = snapshot.val();
+
+      if (savedRole !== "student" && savedRole !== "advisor") {
+        await signOut(auth);
+        setPassword("");
+        setError(
+          "Your account does not have a valid role assigned. Please contact the administrator."
+        );
+        return;
+      }
+
+      if (savedRole !== selectedRole) {
+        await signOut(auth);
+        setPassword("");
+
+        setError(
+          savedRole === "advisor"
+            ? 'Advisor accounts are not permitted in the student login. Please select "I’m an advisor".'
+            : 'Student accounts are not permitted in the advisor login. Please select "I’m a student".'
+        );
+
+        return;
+      }
+
+      router.replace(
+        savedRole === "advisor" ? "/advisor" : "/dashboard"
+      );
+    } catch (err: unknown) {
       console.error(err);
-      setError("Incorrect email or password.");
+
+      if (authenticated) {
+        await signOut(auth).catch(console.error);
+        setPassword("");
+        setError(
+          "We could not verify your account role. Please try again or contact the administrator."
+        );
+      } else {
+        const code =
+          typeof err === "object" &&
+          err !== null &&
+          "code" in err
+            ? String(err.code)
+            : "";
+
+        switch (code) {
+          case "auth/invalid-email":
+            setError("Please enter a valid email address.");
+            break;
+
+          case "auth/invalid-credential":
+          case "auth/user-not-found":
+          case "auth/wrong-password":
+            setError(
+              "Incorrect email or password. Please try again."
+            );
+            break;
+
+          case "auth/user-disabled":
+            setError(
+              "Your account has been disabled. Please contact the administrator."
+            );
+            break;
+
+          case "auth/too-many-requests":
+            setError(
+              "Too many login attempts. Please try again later."
+            );
+            break;
+
+          case "auth/network-request-failed":
+            setError(
+              "Connection error. Please check your internet connection and try again."
+            );
+            break;
+
+          default:
+            setError("Unable to sign in. Please try again.");
+        }
+      }
     } finally {
       setLoading(false);
     }
-  }
-
-  function continueAsAdvisor() {
-    if (!selectedAdvisor) return;
-    router.push(`/dashboard?advisorId=${selectedAdvisor.id}`);
   }
 
   return (
@@ -376,14 +419,16 @@ export default function LoginPage() {
           <div className="flex w-full items-start gap-4 max-sm:flex-col max-sm:items-stretch">
             <RoleCard
               selected={role === "student"}
-              onClick={() => setRole("student")}
+              onClick={() => selectRole("student")}
+              disabled={loading}
               icon="/login/role-student.svg"
               title="I&rsquo;m a student"
               sub="Plan your courses and see what&rsquo;s left."
             />
             <RoleCard
               selected={role === "advisor"}
-              onClick={() => setRole("advisor")}
+              onClick={() => selectRole("advisor")}
+              disabled={loading}
               icon="/login/role-advisor.svg"
               title="I&rsquo;m an advisor"
               sub="See your students and who needs attention."
@@ -391,129 +436,53 @@ export default function LoginPage() {
           </div>
 
           {/* Panel */}
-          {role === "advisor" ? (
-            <div className="flex w-full flex-col gap-[14px] rounded-panel border border-border-subtle bg-surface-card px-7 py-6 shadow-note short:gap-[10px] short:py-[18px]">
-              <div className="flex w-full items-center justify-between">
-                <h2 className="text-title-18 text-ink-primary">Which advisor are you?</h2>
-                <span className="text-caption-12-regular text-ink-secondary">
-                  {advisorsLoading
-                    ? "Loading..."
-                    : advisorsError
-                      ? ""
-                      : `${advisors.length} ${advisors.length === 1 ? "advisor" : "advisors"}`}
-                </span>
+          <div className="flex w-full flex-col gap-[18px] rounded-panel border border-border-subtle bg-surface-card px-7 py-6 shadow-note short:gap-3 short:py-[18px]">
+            <div className="flex w-full items-center justify-between">
+              <h2 className="text-title-18 text-ink-primary">
+                {role === "advisor" ? "Sign in as an advisor" : "Sign in as a student"}
+              </h2>
+              <span className="text-caption-12-regular text-ink-secondary">Use your UCF account</span>
+            </div>
+
+            <form onSubmit={handleLogin} className="flex w-full flex-col gap-[18px] short:gap-3" noValidate>
+              <div className="flex w-full items-start gap-4 max-sm:flex-col">
+                <div className="flex w-full min-w-0 flex-1 flex-col gap-1.5">
+                  <label htmlFor="login-email" className="text-caption-12 text-ink-secondary">UCF email</label>
+                  <input
+                    id="login-email"
+                    className={INPUT}
+                    type="email"
+                    placeholder="you@ucf.edu"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    disabled={loading}
+                  />
+                </div>
+                <div className="flex w-full min-w-0 flex-1 flex-col gap-1.5">
+                  <label htmlFor="login-password" className="text-caption-12 text-ink-secondary">Password</label>
+                  <input
+                    id="login-password"
+                    className={INPUT}
+                    type="password"
+                    placeholder="Password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    disabled={loading}
+                  />
+                </div>
               </div>
 
-              {advisorsError && (
-                <>
-                  <PanelNote role="alert" alert>{advisorsError}</PanelNote>
-                  <button type="button" className={PRIMARY_BUTTON} onClick={retryAdvisors}>
-                    Try again
-                  </button>
-                </>
-              )}
+              {error && <ErrorNote>{error}</ErrorNote>}
 
-              {!advisorsLoading && !advisorsError && advisors.length === 0 && (
-                <PanelNote role="status">No advisors found.</PanelNote>
-              )}
-
-              {advisorsLoading && <PanelNote role="status">Loading advisors...</PanelNote>}
-
-              {advisors.length > 0 && (
-                <div className="flex w-full flex-col gap-2" role="radiogroup" aria-label="Advisors" aria-busy={advisorsLoading}>
-                  {advisors.map((a) => {
-                    const on = a.id === selectedAdvisor?.id;
-                    return (
-                      <button
-                        key={a.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={on}
-                        className={`flex w-full cursor-pointer items-center gap-3 rounded-row py-[10px] pl-3 pr-[14px] text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-primary ${
-                          on
-                            ? "border-[2.5px] border-brand-gold bg-brand-gold-soft"
-                            : "border-[1.5px] border-border-default bg-surface-card hover:border-ink-muted"
-                        }`}
-                        onClick={() => setAdvisorId(a.id)}
-                      >
-                        <span className="flex size-9 flex-none items-center justify-center rounded-pill bg-surface-sunken text-caption-12 text-ink-secondary">
-                          {initialsOf(a.name)}
-                        </span>
-                        <span className="flex min-w-0 flex-1 flex-col">
-                          <span className="truncate text-label-14 text-ink-primary">{a.name}</span>
-                          <span className="truncate text-caption-12-regular text-ink-secondary">
-                            {a.department ? <>{a.department} &middot; </> : null}
-                            {a.students} {a.students === 1 ? "student" : "students"}
-                          </span>
-                        </span>
-                        {on ? (
-                          <span className="flex size-6 flex-none items-center justify-center rounded-pill bg-brand-black">
-                            <Image src="/login/check.svg" alt="" width={16} height={16} />
-                          </span>
-                        ) : (
-                          <Image src="/login/radio-empty.svg" alt="" width={24} height={24} className="flex-none" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {!advisorsError && (
-                <button type="button" className={PRIMARY_BUTTON} onClick={continueAsAdvisor} disabled={!selectedAdvisor}>
-                  {selectedAdvisor
-                    ? `Continue as ${selectedAdvisor.name}`
-                    : advisorsLoading
-                      ? "Loading advisors..."
-                      : "Continue"}
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="flex w-full flex-col gap-[18px] rounded-panel border border-border-subtle bg-surface-card px-7 py-6 shadow-note short:gap-3 short:py-[18px]">
-              <div className="flex w-full items-center justify-between">
-                <h2 className="text-title-18 text-ink-primary">Sign in as a student</h2>
-                <span className="text-caption-12-regular text-ink-secondary">Use your UCF account</span>
-              </div>
-
-              <form onSubmit={handleLogin} className="flex w-full flex-col gap-[18px] short:gap-3">
-                <div className="flex w-full items-start gap-4 max-sm:flex-col">
-                  <div className="flex w-full min-w-0 flex-1 flex-col gap-1.5">
-                    <label htmlFor="login-email" className="text-caption-12 text-ink-secondary">UCF email</label>
-                    <input
-                      id="login-email"
-                      className={INPUT}
-                      type="email"
-                      placeholder="you@ucf.edu"
-                      autoComplete="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <div className="flex w-full min-w-0 flex-1 flex-col gap-1.5">
-                    <label htmlFor="login-password" className="text-caption-12 text-ink-secondary">Password</label>
-                    <input
-                      id="login-password"
-                      className={INPUT}
-                      type="password"
-                      placeholder="Password"
-                      autoComplete="current-password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      required
-                    />
-                  </div>
-                </div>
-
-                {error && <PanelNote role="alert" alert>{error}</PanelNote>}
-
-                <button type="submit" disabled={loading} className={PRIMARY_BUTTON}>
-                  {loading ? "Signing in..." : "Sign in"}
-                </button>
-              </form>
-            </div>
-          )}
+              <button type="submit" disabled={loading} className={PRIMARY_BUTTON}>
+                {loading ? "Signing in..." : "Sign in"}
+              </button>
+            </form>
+          </div>
         </section>
       </div>
     </main>
