@@ -83,6 +83,8 @@ export const NODE_W = 208;
 export const NODE_H = 108;
 export const COL_GAP = 56;
 export const ROW_GAP = 45;
+const REGION_GAP = 56; // extra space between the terms and "Not yet planned"
+const ADD_H = 36; // height of the "Add course" placeholder
 const COL_PITCH = NODE_W + COL_GAP;
 const ROW_PITCH = NODE_H + ROW_GAP;
 export const HEADER_H = 42;
@@ -117,11 +119,15 @@ export type BoardColumn = {
   x: number;
   width: number;
   addY?: number; // where the disabled "Add course" placeholder sits
+  groups?: BoardGroup[]; // subheadings inside "Not yet planned"
 };
+
+export type BoardGroup = { label: string; state: "available" | "locked"; count: number; x: number };
 
 export type BoardEdge = { id: string; source: string; target: string };
 
-export type Board = { columns: BoardColumn[]; courses: BoardCourse[]; edges: BoardEdge[] };
+// `bottom` is the lowest point any column reaches, so the term bands can all run the full height.
+export type Board = { columns: BoardColumn[]; courses: BoardCourse[]; edges: BoardEdge[]; bottom: number };
 
 const SEASONS: Record<string, number> = { spring: 1, summer: 2, fall: 3 };
 
@@ -234,37 +240,50 @@ export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequ
 
   // 3. Everything still required and not in the plan, by depth, wrapped into columns no taller
   //    than the tallest term so the board stays a rectangle.
+  //    It is its own region, set apart from the terms by a gap, with the courses that can be
+  //    taken now grouped ahead of the locked ones.
   const planned = new Set(plan.items.map((i) => i.courseId));
   const unplanned = student.remaining
     .filter((r) => !planned.has(r.course_id))
     .sort((a, b) => a.depth - b.depth || Number(b.critical_path) - Number(a.critical_path) || a.code.localeCompare(b.code));
   if (unplanned.length > 0) {
-    const firstColumn = columns.length;
     const rowsPerColumn = Math.max(6, plan.items.length + 1, ...[...byTerm.values()].map((rows) => rows.length));
-    const span = Math.ceil(unplanned.length / rowsPerColumn);
+    const regionX = columns.length * COL_PITCH + REGION_GAP;
+    const groups: BoardGroup[] = [];
+    let nextColumn = 0;
+    for (const [label, state] of [["Available now", "available"], ["Locked", "locked"]] as const) {
+      const rows = unplanned.filter((r) => r.eligible === (state === "available"));
+      if (rows.length === 0) continue;
+      groups.push({ label, state, count: rows.length, x: regionX + nextColumn * COL_PITCH });
+      rows.forEach((r, i) => {
+        const column = nextColumn + Math.floor(i / rowsPerColumn);
+        courses.push({
+          id: `unplanned:${r.code}`,
+          code: r.code,
+          title: r.title,
+          credits: r.credits,
+          state,
+          where: "unplanned",
+          termLabel: "Not yet planned",
+          criticalPath: r.critical_path,
+          fills: fillsOf(r),
+          column: columns.length + column,
+          x: regionX + column * COL_PITCH,
+          y: FIRST_ROW_Y + (i % rowsPerColumn) * ROW_PITCH,
+        });
+      });
+      nextColumn += Math.ceil(rows.length / rowsPerColumn);
+    }
     columns.push({
       id: "unplanned",
       title: "Not yet planned",
       sub: `${unplanned.length} ${unplanned.length === 1 ? "course" : "courses"} · ${cr(sum(unplanned))}`,
       now: false,
       where: "unplanned",
-      x: firstColumn * COL_PITCH,
-      width: (span - 1) * COL_PITCH + NODE_W,
+      x: regionX,
+      width: (nextColumn - 1) * COL_PITCH + NODE_W,
+      groups,
     });
-    unplanned.forEach((r, i) =>
-      courses.push({
-        id: `unplanned:${r.code}`,
-        code: r.code,
-        title: r.title,
-        credits: r.credits,
-        state: r.eligible ? "available" : "locked",
-        where: "unplanned",
-        termLabel: "Not yet planned",
-        criticalPath: r.critical_path,
-        fills: fillsOf(r),
-        ...place(firstColumn + Math.floor(i / rowsPerColumn), i % rowsPerColumn),
-      }),
-    );
   }
 
   // 4. Connectors: one per prerequisite pair that has both ends on the board. A course can be on
@@ -283,7 +302,12 @@ export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequ
     }
   }
 
-  return { columns, courses, edges: [...edges.values()] };
+  const bottom = Math.max(
+    FIRST_ROW_Y + NODE_H,
+    ...courses.map((c) => c.y + NODE_H),
+    ...columns.map((c) => (c.addY ?? 0) + ADD_H),
+  );
+  return { columns, courses, edges: [...edges.values()], bottom };
 }
 
 // Prerequisite groups of one course: every group is needed, any one course in a group satisfies it.

@@ -37,6 +37,7 @@ import {
   type Board,
   type BoardColumn,
   type BoardCourse,
+  type BoardGroup,
   type PlanResponse,
   type Prerequisite,
   type StudentResponse,
@@ -66,17 +67,27 @@ const LABEL = "text-overline-12 uppercase whitespace-nowrap text-ink-secondary";
 
 // ---------------------------------------------------------------- board nodes
 
-type CourseData = { course: BoardCourse; selected: boolean; dimmed: boolean; onSelect: (id: string) => void };
+type CourseData = {
+  course: BoardCourse;
+  selected: boolean;
+  dimmed: boolean;
+  onSelect: (id: string) => void;
+  onHover: (id: string | null) => void;
+};
 
 const HIDDEN_HANDLE = { opacity: 0, pointerEvents: "none" } as const;
 
 function CourseFlowNode({ data }: NodeProps<Node<CourseData>>) {
-  const { course, selected, dimmed, onSelect } = data;
+  const { course, selected, dimmed, onSelect, onHover } = data;
   return (
     <button
       type="button"
       aria-pressed={selected}
       onClick={() => onSelect(course.id)}
+      onMouseEnter={() => onHover(course.id)}
+      onMouseLeave={() => onHover(null)}
+      onFocus={() => onHover(course.id)}
+      onBlur={() => onHover(null)}
       className={`relative block cursor-pointer rounded-card text-left transition-opacity focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink-primary ${
         dimmed ? "opacity-50" : ""
       }`}
@@ -118,9 +129,37 @@ function TermFlowNode({ data }: NodeProps<Node<{ column: BoardColumn }>>) {
       <div className="flex h-6 items-center gap-2">
         <h2 className="text-title-18 whitespace-nowrap text-ink-primary">{column.title}</h2>
         {column.now && <Pill tone="gold">Now</Pill>}
+        {column.where === "plan" && (
+          <span className="rounded-pill border-[1.5px] border-ink-on-gold bg-brand-gold px-2 py-px text-caption-12 text-ink-on-gold">
+            Plan
+          </span>
+        )}
       </div>
       <p className="text-caption-12-regular whitespace-nowrap text-ink-muted">{column.sub}</p>
     </div>
+  );
+}
+
+// Full-height band behind a term. Terms alternate between a faint tint and none, the plan's term
+// is faint gold, and "Not yet planned" is one wide dashed region.
+const BAND = {
+  plain: "",
+  tint: "bg-surface-sunken/60",
+  plan: "border border-brand-gold/40 bg-brand-gold-soft/45",
+  unplanned: "border-[1.5px] border-dashed border-border-default bg-surface-sunken/45",
+};
+
+function BandFlowNode({ data }: NodeProps<Node<{ look: keyof typeof BAND; width: number; height: number }>>) {
+  return <div className={`rounded-panel ${BAND[data.look]}`} style={{ width: data.width, height: data.height }} />;
+}
+
+function GroupFlowNode({ data }: NodeProps<Node<{ group: BoardGroup }>>) {
+  const { group } = data;
+  return (
+    <h3 className="flex items-center gap-1.5 pl-1 text-overline-12 uppercase whitespace-nowrap text-ink-secondary">
+      <Image src={STATE_ICON[group.state]} alt="" width={16} height={16} />
+      {group.label} · {group.count}
+    </h3>
   );
 }
 
@@ -182,7 +221,10 @@ function openingViewport(board: Board, width: number, height: number) {
   return { x: FIT.side, y: FIT.top, zoom };
 }
 
-const NODE_TYPES = { course: CourseFlowNode, term: TermFlowNode, add: AddFlowNode };
+const NODE_TYPES = { course: CourseFlowNode, term: TermFlowNode, add: AddFlowNode, band: BandFlowNode, heading: GroupFlowNode };
+
+// How far a band reaches beyond its column: half the gap to each side, a little above and below.
+const BAND_PAD = { x: COL_GAP / 2 - 6, top: 16, bottom: 24 };
 
 // ---------------------------------------------------------------- canvas overlays
 
@@ -198,7 +240,7 @@ function Legend() {
     ["suggested", "Suggested"],
   ];
   return (
-    <Panel position="bottom-left" style={{ margin: 24 }}>
+    <Panel position="bottom-left" style={{ margin: 24, maxWidth: "calc(100% - 210px)" }}>
       <ul className={`${OVERLAY} flex-wrap gap-x-[18px] gap-y-2`}>
         {entries.map(([state, label]) => (
           <li key={state} className="flex items-center gap-1.5 text-caption-12 whitespace-nowrap text-ink-secondary">
@@ -207,8 +249,8 @@ function Legend() {
           </li>
         ))}
         <li className="flex items-center gap-1.5 text-caption-12 whitespace-nowrap text-ink-secondary max-xl:hidden">
-          <span className="h-[3px] w-6 rounded-pill bg-line-default" />
-          Prerequisite
+          <span className="h-[3.5px] w-6 rounded-pill bg-brand-gold" />
+          Prerequisite, on hover or select
         </li>
       </ul>
     </Panel>
@@ -528,20 +570,47 @@ function BoardCanvas({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
 }) {
-  const { nodes, edges } = useMemo(() => {
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  const nodes = useMemo(() => {
     const linked = board.edges.filter((e) => e.source === selectedId || e.target === selectedId);
     const related = new Set(linked.flatMap((e) => [e.source, e.target]));
+    const backdrop = { selectable: false, focusable: false, style: { pointerEvents: "none" as const } };
+    let terms = 0;
 
     const nodes: Node[] = [
       ...board.columns.map((column) => ({
+        ...backdrop,
+        id: `band:${column.id}`,
+        type: "band",
+        zIndex: -1,
+        position: { x: column.x - BAND_PAD.x, y: -BAND_PAD.top },
+        data: {
+          look: column.where === "term" ? (terms++ % 2 === 0 ? "tint" : "plain") : column.where,
+          width: column.width + BAND_PAD.x * 2,
+          height: board.bottom + BAND_PAD.top + BAND_PAD.bottom,
+        },
+      })),
+      ...board.columns.map((column) => ({
+        ...backdrop,
         id: column.id,
         type: "term",
         position: { x: column.x, y: 0 },
         width: column.width,
         height: HEADER_H,
         data: { column },
-        selectable: false,
       })),
+      ...board.columns.flatMap((column) =>
+        (column.groups ?? []).map((group) => ({
+          ...backdrop,
+          id: `group:${group.state}`,
+          // Not "group": React Flow reserves that type name and draws a box around it.
+          type: "heading",
+          // In the gap between the region header and the first row of notes.
+          position: { x: group.x, y: HEADER_H + 8 },
+          data: { group },
+        })),
+      ),
       ...board.columns
         .filter((column) => column.addY !== undefined)
         .map((column) => ({
@@ -562,38 +631,36 @@ function BoardCanvas({
           selected: course.id === selectedId,
           dimmed: selectedId !== null && course.id !== selectedId && !related.has(course.id),
           onSelect,
+          onHover: setHoveredId,
         },
       })),
     ];
+    return nodes;
+  }, [board, selectedId, onSelect]);
 
-    // Faint by default. With a course selected, only its own prerequisite and unlock connectors
-    // show, solid gold with an arrowhead at the course that needs the other.
-    const edges: Edge[] = board.edges.map((e) => {
-      const highlighted = e.source === selectedId || e.target === selectedId;
-      return {
+  // Connectors stay hidden until a course is hovered, focused or selected. Then that course's
+  // prerequisite and unlock connectors show in gold, with an arrowhead at the course that needs
+  // the other.
+  const edges = useMemo(
+    (): Edge[] =>
+      board.edges.map((e) => ({
         ...e,
         type: "lane",
         focusable: false,
         selectable: false,
-        hidden: selectedId !== null && !highlighted,
-        zIndex: highlighted ? 1 : 0,
-        style: highlighted
-          ? { stroke: "var(--color-brand-gold)", strokeWidth: 3.5 }
-          : { stroke: "var(--color-line-default)", strokeWidth: 1.5, opacity: 0.5 },
-        markerEnd: highlighted
-          ? {
-              type: MarkerType.ArrowClosed,
-              color: "var(--color-brand-gold)",
-              markerUnits: "userSpaceOnUse",
-              width: 18,
-              height: 18,
-            }
-          : undefined,
-      };
-    });
-
-    return { nodes, edges };
-  }, [board, selectedId, onSelect]);
+        hidden: ![e.source, e.target].some((id) => id === selectedId || id === hoveredId),
+        zIndex: 1,
+        style: { stroke: "var(--color-brand-gold)", strokeWidth: 3.5 },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: "var(--color-brand-gold)",
+          markerUnits: "userSpaceOnUse",
+          width: 18,
+          height: 18,
+        },
+      })),
+    [board, selectedId, hoveredId],
+  );
 
   return (
     <ReactFlow
