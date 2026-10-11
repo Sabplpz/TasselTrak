@@ -6,12 +6,13 @@ import { Button, TextButton } from "@/components/Button";
 import { Pill } from "@/components/Chip";
 import { SuggestedTag } from "@/components/CourseNode";
 import { Skeleton } from "@/components/State";
-import { explain, getAlternatives, type Alternative, type PlanResponse, type Prerequisite } from "@/lib/planApi";
+import { explain, getAlternatives, type Alternative, type PlanResponse, type Prerequisite, type TermRef } from "@/lib/planApi";
 import { BADGE_ICON, STATE_ICON, prerequisiteGroups, unlockedBy, type Board, type BoardCourse } from "./board";
 
 const LABEL = "text-overline-12 uppercase whitespace-nowrap text-ink-secondary";
 
-export type EditError = { title: string; message: string };
+// `action` is a way forward the API offered, e.g. "Move to Fall 2027".
+export type EditError = { title: string; message: string; action?: { label: string; onClick: () => void } };
 
 function CourseRef({ code, board }: { code: string; board: Board }) {
   // A course can be on the board twice (a failed attempt and its retake): describe the latest.
@@ -47,24 +48,28 @@ type Alternatives = { status: "closed" } | { status: "loading" } | { status: "er
 
 function SelectedCourse({
   planId,
-  termName,
+  terms,
   course,
   board,
   prerequisites,
   busy,
   onClose,
   onAdd,
+  onMove,
+  onConfirm,
   onSwap,
   onRemove,
 }: {
   planId: number;
-  termName: string;
+  terms: TermRef[]; // the plan terms on the board
   course: BoardCourse;
   board: Board;
   prerequisites: Prerequisite[];
-  busy: boolean;
+  busy: boolean; // a request is in flight, or the plan is read-only
   onClose: () => void;
-  onAdd: (course: BoardCourse) => void;
+  onAdd: (course: BoardCourse, term: TermRef) => void;
+  onMove: (course: BoardCourse, term: TermRef) => void;
+  onConfirm: (course: BoardCourse) => void;
   onSwap: (course: BoardCourse, alternative: Alternative) => void;
   onRemove: (course: BoardCourse) => void;
 }) {
@@ -82,7 +87,7 @@ function SelectedCourse({
     }
     setAlternatives({ status: "loading" });
     try {
-      setAlternatives({ status: "ready", list: await getAlternatives(planId, item.id) });
+      setAlternatives({ status: "ready", list: await getAlternatives(planId, course.courseId) });
     } catch (e) {
       setAlternatives({ status: "error", reason: explain(e) });
     }
@@ -118,10 +123,11 @@ function SelectedCourse({
 
       {item && (
         <div className="flex flex-wrap gap-2">
-          {/* Confirming a suggestion has no API route yet. */}
-          <Button variant="gold" size="sm" full={false} disabled>
-            Confirm
-          </Button>
+          {item.suggested && (
+            <Button variant="gold" size="sm" full={false} disabled={busy} onClick={() => onConfirm(course)}>
+              Confirm
+            </Button>
+          )}
           <Button
             variant="secondary"
             size="sm"
@@ -135,14 +141,34 @@ function SelectedCourse({
           <Button variant="secondary" size="sm" full={false} disabled={busy} onClick={() => onRemove(course)}>
             Remove
           </Button>
+          {/* The same move as dragging the note to another plan term. */}
+          {terms
+            .filter((term) => term.code !== course.termCode)
+            .map((term) => (
+              <Button key={term.code} variant="secondary" size="sm" full={false} disabled={busy} onClick={() => onMove(course, term)}>
+                Move to {term.name}
+              </Button>
+            ))}
         </div>
       )}
 
-      {course.drag === "add" && (
-        <div className="flex">
-          <Button variant="gold" size="sm" full={false} disabled={busy} onClick={() => onAdd(course)}>
-            Add to {termName}
-          </Button>
+      {course.where === "unplanned" && (
+        <div className="flex flex-wrap gap-2">
+          {/* The same add as dragging the note into a plan term; offered where the prerequisites are met. */}
+          {terms
+            .filter((term) => course.fit[term.code]?.met)
+            .map((term, i) => (
+              <Button
+                key={term.code}
+                variant={i === 0 ? "gold" : "secondary"}
+                size="sm"
+                full={false}
+                disabled={busy}
+                onClick={() => onAdd(course, term)}
+              >
+                Add to {term.name}
+              </Button>
+            ))}
         </div>
       )}
 
@@ -157,7 +183,7 @@ function SelectedCourse({
             </p>
           ) : alternatives.list.length === 0 ? (
             <p className="border-t border-border-subtle py-[7px] text-body-14 text-ink-secondary">
-              There is nothing else this student can take in {termName}.
+              There is nothing else this student can take in {course.termLabel}.
             </p>
           ) : (
             <ul className="max-h-[228px] overflow-y-auto">
@@ -308,10 +334,13 @@ export function PlanPanel({
   prerequisites,
   selected,
   busy,
+  terms,
   editError,
   onDismissError,
   onSelect,
   onAdd,
+  onMove,
+  onConfirm,
   onSwap,
   onRemove,
 }: {
@@ -320,18 +349,27 @@ export function PlanPanel({
   prerequisites: Prerequisite[];
   selected: BoardCourse | null;
   busy: boolean;
+  terms: TermRef[];
   editError: EditError | null;
   onDismissError: () => void;
   onSelect: (id: string | null) => void;
-  onAdd: (course: BoardCourse) => void;
+  onAdd: (course: BoardCourse, term: TermRef) => void;
+  onMove: (course: BoardCourse, term: TermRef) => void;
+  onConfirm: (course: BoardCourse) => void;
   onSwap: (course: BoardCourse, alternative: Alternative) => void;
   onRemove: (course: BoardCourse) => void;
 }) {
   const { credits, target, courses } = plan.totals;
+  const points = plan.plan.rationalePoints ?? [];
   const planned = board.courses.filter((c) => c.where === "plan");
 
   return (
     <aside aria-label="Plan details" className={PANEL}>
+      {plan.readOnly && (
+        <p className="flex-none rounded-field border border-border-subtle bg-surface-sunken px-3 py-[10px] text-body-14 text-ink-primary">
+          This plan is approved and read-only.
+        </p>
+      )}
       {editError && (
         <section
           role="alert"
@@ -342,7 +380,12 @@ export function PlanPanel({
             <h2 className="min-w-0 flex-1 text-label-16 text-ink-primary">{editError.title}</h2>
           </div>
           <p className="text-body-14 text-ink-primary">{editError.message}</p>
-          <div className="flex">
+          <div className="flex flex-wrap gap-2">
+            {editError.action && (
+              <Button variant="gold" size="sm" full={false} disabled={busy} onClick={editError.action.onClick}>
+                {editError.action.label}
+              </Button>
+            )}
             <Button variant="secondary" size="sm" full={false} onClick={onDismissError}>
               Dismiss
             </Button>
@@ -354,13 +397,15 @@ export function PlanPanel({
         <SelectedCourse
           key={selected.id}
           planId={plan.plan.id}
-          termName={plan.term.name}
+          terms={terms}
           course={selected}
           board={board}
           prerequisites={prerequisites}
-          busy={busy}
+          busy={busy || plan.readOnly}
           onClose={() => onSelect(null)}
           onAdd={onAdd}
+          onMove={onMove}
+          onConfirm={onConfirm}
           onSwap={onSwap}
           onRemove={onRemove}
         />
@@ -368,7 +413,18 @@ export function PlanPanel({
 
       <section className="flex flex-none flex-col gap-[10px]">
         <h2 className={LABEL}>Why this plan</h2>
-        <p className="text-body-14 text-ink-primary">{plan.plan.rationale ?? "No rationale was recorded for this plan."}</p>
+        {points.length > 0 ? (
+          <ul className="flex flex-col gap-[10px]">
+            {points.map((point, i) => (
+              <li key={i} className="flex items-start gap-2 text-body-14 text-ink-primary">
+                <span className="mt-[7px] size-1.5 flex-none rounded-pill border-[1.5px] border-brand-gold-deep bg-brand-gold" />
+                {point}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-body-14 text-ink-primary">{plan.plan.rationale ?? "No rationale was recorded for this plan."}</p>
+        )}
         <p className="text-caption-12-regular text-ink-secondary">
           {plan.plan.createdBy === "ai" ? "Drafted by AI" : "Created by an advisor"}
           {plan.plan.modelName ? ` · ${plan.plan.modelName}` : ""}
@@ -377,17 +433,21 @@ export function PlanPanel({
 
       <section className="flex flex-none flex-col gap-[10px]">
         <h2 className={LABEL}>Credits per term</h2>
-        <div className="flex items-center gap-[10px]">
-          <span className="w-[92px] flex-none text-body-14 text-ink-primary">{plan.term.name}</span>
-          <span className="h-2 min-w-0 flex-1 overflow-clip rounded-pill border border-border-default bg-surface-sunken">
-            <span
-              className="block h-full bg-ink-primary transition-[width]"
-              style={{ width: `${target > 0 ? Math.min(100, (credits / target) * 100) : 0}%` }}
-            />
-          </span>
-          <span className="flex-none text-label-14 whitespace-nowrap text-ink-primary">{credits} cr</span>
-        </div>
-        <p className="text-caption-12-regular text-ink-secondary">Target: {target} cr</p>
+        {plan.totals.byTerm.map((term) => (
+          <div key={term.code} className="flex items-center gap-[10px]">
+            <span className="w-[92px] flex-none text-body-14 text-ink-primary">
+              {plan.terms.find((t) => t.code === term.code)?.name ?? term.code}
+            </span>
+            <span className="h-2 min-w-0 flex-1 overflow-clip rounded-pill border border-border-default bg-surface-sunken">
+              <span
+                className="block h-full bg-ink-primary transition-[width]"
+                style={{ width: `${target > 0 ? Math.min(100, (term.credits / target) * 100) : 0}%` }}
+              />
+            </span>
+            <span className="flex-none text-label-14 whitespace-nowrap text-ink-primary">{term.credits} cr</span>
+          </div>
+        ))}
+        <p className="text-caption-12-regular text-ink-secondary">Target: {target} cr per term</p>
         {plan.issues.length > 0 && (
           <ul className="flex flex-col gap-1 text-body-14 text-ink-primary">
             {plan.issues.map((issue, i) => (

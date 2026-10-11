@@ -22,6 +22,7 @@ import { CourseNode, type CourseState } from "@/components/CourseNode";
 import {
   BADGE_ICON,
   STATE_ICON,
+  codesIn,
   COL_GAP,
   ROW_GAP,
   HEADER_H,
@@ -191,7 +192,8 @@ type BandData = {
   look: keyof typeof BAND;
   width: number;
   height: number;
-  zone: { kind: keyof typeof ZONE; text: string; over: boolean; labelTop: number } | null;
+  // `wide`: a region of several columns, where the label sits beside the header instead of centred
+  zone: { kind: keyof typeof ZONE; text: string; over: boolean; labelTop: number; wide: boolean } | null;
 };
 
 function BandFlowNode({ data }: NodeProps<Node<BandData>>) {
@@ -204,7 +206,7 @@ function BandFlowNode({ data }: NodeProps<Node<BandData>>) {
       style={{ width: data.width, height: data.height }}
     >
       {zone && (
-        <span style={{ top: zone.labelTop }} className="absolute inset-x-0 flex justify-center">
+        <span style={{ top: zone.labelTop }} className={`absolute inset-x-0 flex ${zone.wide ? "justify-start pl-[190px]" : "justify-center"}`}>
           <span
             className={`flex items-center gap-1.5 rounded-pill py-1.5 pl-[10px] pr-[14px] text-caption-12 whitespace-nowrap ${ZONE[zone.kind].label}`}
           >
@@ -354,83 +356,87 @@ function ZoomControl() {
 
 type Drag = { id: string; x: number; y: number };
 
+type Zone = { kind: keyof typeof ZONE; text: string; missing: string[] };
+
+// What dropping `dragged` on `column` would do, or null if that column is not a target for it.
+// A course in the plan can move to another plan term or leave the plan. A course that is not
+// planned yet can go into any plan term whose prerequisites it meets.
+function dropZone(dragged: BoardCourse, column: BoardColumn): Zone | null {
+  if (dragged.drag === "plan") {
+    if (column.where === "unplanned") return { kind: "valid", text: "Drop to take out of the plan", missing: [] };
+    if (column.where === "plan" && column.termCode !== dragged.termCode) {
+      return { kind: "valid", text: `Drop to move to ${column.title}`, missing: [] };
+    }
+    return null;
+  }
+  if (dragged.drag === "unplanned" && column.where === "plan" && column.termCode) {
+    const fit = dragged.fit[column.termCode];
+    return fit && !fit.met
+      ? { kind: "invalid", text: "Can’t move here yet", missing: fit.missing }
+      : { kind: "valid", text: `Drop to add to ${column.title}`, missing: [] };
+  }
+  return null;
+}
+
 export function BoardCanvas({
   board,
-  planTerm,
   selectedId,
   onSelect,
   locked,
   noteErrors,
-  blockers,
   onAdd,
-  onDropAdd,
-  onDropRemove,
-  onDropLocked,
+  onDrop,
 }: {
   board: Board;
-  planTerm: string;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
-  locked: boolean; // a request is in flight: nothing can be dragged or added
+  locked: boolean; // nothing can be dragged or added: a request is in flight, or the plan is read-only
   noteErrors: Record<string, string>;
-  blockers: (course: BoardCourse) => string[]; // codes a locked course is waiting on
-  onAdd: () => void;
-  onDropAdd: (course: BoardCourse) => void;
-  onDropRemove: (course: BoardCourse) => void;
-  onDropLocked: (course: BoardCourse) => void;
+  onAdd: (termCode: string) => void;
+  // `missing` is empty for a drop the board allows; otherwise it is what the course still needs.
+  onDrop: (course: BoardCourse, column: BoardColumn, missing: string[]) => void;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
 
   const dragged = drag ? (board.courses.find((c) => c.id === drag.id) ?? null) : null;
-  // A plan course goes back to "Not yet planned"; anything else is headed for the plan's term.
-  const target = dragged ? board.columns.find((c) => c.where === (dragged.drag === "remove" ? "unplanned" : "plan")) : null;
 
-  const isOver = (column: BoardColumn | null | undefined, position: { x: number; y: number }) => {
-    if (!column) return false;
+  const columnUnder = (position: { x: number; y: number }) => {
     const cx = position.x + NODE_W / 2;
     const cy = position.y + NODE_H / 2;
-    return (
-      cx >= column.x - BAND_PAD.x &&
-      cx <= column.x + column.width + BAND_PAD.x &&
-      cy >= -BAND_PAD.top &&
-      cy <= board.bottom + BAND_PAD.bottom
-    );
+    if (cy < -BAND_PAD.top || cy > board.bottom + BAND_PAD.bottom) return null;
+    return board.columns.find((c) => cx >= c.x - BAND_PAD.x && cx <= c.x + c.width + BAND_PAD.x) ?? null;
   };
 
   const nodes = useMemo(() => {
     const linked = board.edges.filter((e) => e.source === selectedId || e.target === selectedId);
     const related = new Set(linked.flatMap((e) => [e.source, e.target]));
     const backdrop = { selectable: false, focusable: false, draggable: false, style: { pointerEvents: "none" as const } };
-    const over = drag ? isOver(target, drag) : false;
 
-    // The latest note for each course the dragged, locked course is waiting on.
-    const blocking = new Set<string>();
-    if (dragged?.drag === "locked") {
-      for (const code of blockers(dragged)) {
-        const note = board.courses.filter((c) => c.code === code).at(-1);
-        if (note) blocking.add(note.id);
+    const zones = new Map<string, Zone>();
+    if (dragged) {
+      for (const column of board.columns) {
+        const zone = dropZone(dragged, column);
+        if (zone) zones.set(column.id, zone);
       }
+    }
+    const over = drag ? columnUnder(drag) : null;
+    // The refusal to explain while dragging: the band under the note, or failing that the first
+    // band that would refuse it. Its missing courses are the "blocking" ones.
+    const refusing =
+      (over && zones.get(over.id)?.kind === "invalid" ? zones.get(over.id) : null) ??
+      (over && zones.has(over.id) ? null : [...zones.values()].find((z) => z.kind === "invalid")) ??
+      null;
+    const blocking = new Set<string>();
+    for (const code of refusing ? codesIn(refusing.missing) : []) {
+      const note = board.courses.filter((c) => c.code === code).at(-1);
+      if (note) blocking.add(note.id);
     }
 
     let terms = 0;
     const nodes: Node[] = [
       ...board.columns.map((column) => {
-        const zone =
-          dragged && target?.id === column.id
-            ? {
-                kind: dragged.drag === "locked" ? ("invalid" as const) : ("valid" as const),
-                text:
-                  dragged.drag === "locked"
-                    ? "Can’t move here yet"
-                    : dragged.drag === "remove"
-                      ? "Drop to take out of the plan"
-                      : `Drop to add to ${planTerm}`,
-                over,
-                // Just under the last note of a single column, or in the header row of a wide region.
-                labelTop: column.addY !== undefined ? column.addY + BAND_PAD.top + 52 : BAND_PAD.top + 4,
-              }
-            : null;
+        const zone = zones.get(column.id);
         return {
           ...backdrop,
           id: `band:${column.id}`,
@@ -441,7 +447,16 @@ export function BoardCanvas({
             look: column.where === "term" ? (terms++ % 2 === 0 ? "tint" : "plain") : column.where,
             width: column.width + BAND_PAD.x * 2,
             height: board.bottom + BAND_PAD.top + BAND_PAD.bottom,
-            zone,
+            zone: zone
+              ? {
+                  kind: zone.kind,
+                  text: zone.text,
+                  over: over?.id === column.id,
+                  // Just under the last note of a single column, or in the header row of a wide region.
+                  labelTop: column.addY !== undefined ? column.addY + BAND_PAD.top + 52 : BAND_PAD.top + 4,
+                  wide: column.addY === undefined,
+                }
+              : null,
           },
         };
       }),
@@ -465,12 +480,12 @@ export function BoardCanvas({
         })),
       ),
       ...board.columns
-        .filter((column) => column.addY !== undefined)
+        .filter((column) => column.addY !== undefined && column.termCode !== null)
         .map((column) => ({
           id: `add:${column.id}`,
           type: "add",
           position: { x: column.x, y: column.addY! },
-          data: { disabled: locked, onAdd },
+          data: { disabled: locked, onAdd: () => onAdd(column.termCode!) },
           selectable: false,
           draggable: false,
         })),
@@ -497,7 +512,7 @@ export function BoardCanvas({
             draggable,
             dragging,
             blocking: blocking.has(course.id),
-            tooltip: dragging && course.drag === "locked" ? `${course.status ?? "Prerequisites not met"} first` : null,
+            tooltip: dragging && refusing ? `Needs ${refusing.missing.join(" and ")} first` : null,
             error: dragging ? null : (noteErrors[course.id] ?? null),
             onSelect,
             onHover: setHoveredId,
@@ -506,9 +521,9 @@ export function BoardCanvas({
       }),
     ];
     return nodes;
-    // isOver and blockers only read the values listed here
+    // columnUnder only reads `board`, which is listed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [board, selectedId, onSelect, drag, dragged, target, locked, noteErrors, onAdd, planTerm]);
+  }, [board, selectedId, onSelect, drag, dragged, locked, noteErrors, onAdd]);
 
   // Connectors stay hidden until a course is hovered, focused, selected or dragged. Then that
   // course's prerequisite and unlock connectors show in gold, with an arrowhead at the course
@@ -558,11 +573,10 @@ export function BoardCanvas({
       onNodeDrag={(_, node) => setDrag({ id: node.id, x: node.position.x, y: node.position.y })}
       onNodeDragStop={(_, node) => {
         setDrag(null);
-        // Any drop that is not on the note's own target band just snaps back.
-        if (!dragged || !isOver(target, node.position)) return;
-        if (dragged.drag === "add") onDropAdd(dragged);
-        else if (dragged.drag === "remove") onDropRemove(dragged);
-        else onDropLocked(dragged);
+        // Any drop that is not on one of the note's own target bands just snaps back.
+        const column = dragged ? columnUnder(node.position) : null;
+        const zone = dragged && column ? dropZone(dragged, column) : null;
+        if (dragged && column && zone) onDrop(dragged, column, zone.missing);
       }}
       attributionPosition="bottom-center"
       onPaneClick={() => onSelect(null)}

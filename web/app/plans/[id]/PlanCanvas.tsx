@@ -1,46 +1,103 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { TopBar } from "@/components/TopBar";
 import { Button, ButtonLink } from "@/components/Button";
 import { Avatar, Pill, PlanStatusChip } from "@/components/Chip";
 import { Skeleton, StateMessage } from "@/components/State";
-import { reasonOf } from "@/lib/fetchJson";
 import {
   addCourse,
-  checkCourse,
+  codeOf,
+  confirmCourse,
   explain,
   generatePlan,
-  isMissing,
-  loadBoard,
+  getCourseOptions,
+  getDependents,
+  getPlan,
+  getPrerequisites,
+  getStudentExtras,
+  moveCourse,
+  PlanApiError,
   removeCourse,
+  restoreCourse,
   swapCourse,
   type Alternative,
-  type PlanBoardData,
+  type CourseOptions,
+  type PlanResponse,
+  type Prerequisite,
+  type StudentExtras,
+  type TermRef,
 } from "@/lib/planApi";
 import type { Advisor } from "@/lib/useAdvisorSession";
 import { BoardCanvas } from "./BoardCanvas";
-import { CoursePicker, FailedBanner, GenerateDialog, GeneratingBanner, RemoveDialog, Toast, type PickerCourse } from "./Dialogs";
+import {
+  CoursePicker,
+  GenerateDialog,
+  GeneratingBanner,
+  NoticeBanner,
+  RemoveDialog,
+  Toast,
+  type Dependents,
+  type PickerError,
+} from "./Dialogs";
 import { PlanPanel, PlanPanelSkeleton, type EditError } from "./PlanPanel";
-import { buildBoard, unlockedBy, NODE_W, type BoardCourse } from "./board";
+import { buildBoard, planTerms, termAfter, NODE_W, type BoardColumn, type BoardCourse } from "./board";
+
+// Everything the board is built from. `later` is the empty plan term after the last one, shown
+// so courses can be moved into it; null when the API does not know that term or the plan is
+// read-only.
+type BoardData = {
+  plan: PlanResponse;
+  prerequisites: Prerequisite[];
+  options: Record<string, CourseOptions>;
+  extras: StudentExtras | null;
+  later: TermRef | null;
+};
 
 type Load =
   | { status: "loading" }
   | { status: "missing" }
   | { status: "error"; reason: string }
-  | { status: "ready"; data: PlanBoardData };
+  | { status: "ready"; data: BoardData };
 
-type Dialog = null | { kind: "generate" } | { kind: "picker" } | { kind: "remove"; course: BoardCourse };
+// A course as the change handlers need it: enough to call the API and to name it.
+type CourseRef = { courseId: number; code: string; nodeId?: string };
 
-type Generation = { status: "idle" } | { status: "running" } | { status: "failed"; message: string };
+type Dialog =
+  | null
+  | { kind: "generate"; planId: number; status: PlanResponse["plan"]["status"] }
+  | { kind: "picker"; term: TermRef }
+  | { kind: "remove"; course: BoardCourse };
 
-// What a locked course is waiting on, from the API's own check.
-type Need = { text: string; sentence: string; codes: string[] };
+type Generation =
+  | { status: "idle" }
+  | { status: "running" }
+  | { status: "failed"; message: string; retry: (() => void) | null };
 
-const COURSE_CODE = /[A-Z]{2,4} [A-Z0-9]{3,5}/g;
-const humanize = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+type ToastState = { message: string; undo?: () => void };
+
+async function loadBoardData(planId: string | number): Promise<BoardData> {
+  const plan = await getPlan(planId);
+  const last = planTerms(plan, null).at(-1)!;
+  const candidate = plan.readOnly ? null : termAfter(last);
+  const terms = planTerms(plan, candidate);
+  // The plan and its prerequisites are required. The rest only enriches the board, so a failure
+  // there leaves that part out instead of failing the page.
+  const [prerequisites, extras, ...lists] = await Promise.all([
+    getPrerequisites(plan.plan.id),
+    getStudentExtras(plan.plan.studentId).catch(() => null),
+    ...terms.map((term) => getCourseOptions(plan.plan.id, term.code).catch(() => null)),
+  ]);
+  const options: Record<string, CourseOptions> = {};
+  terms.forEach((term, i) => {
+    const list = lists[i];
+    if (list) options[term.code] = list;
+  });
+  const later = candidate && options[candidate.code]?.term.open ? candidate : null;
+  return { plan, prerequisites, options, extras, later };
+}
 
 function Shell({
   advisor,
@@ -101,23 +158,25 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
   // Editing state. `busy` is true while any request that changes the plan is in flight.
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [dependents, setDependents] = useState<Dependents>({ status: "loading" });
+  const [toast, setToast] = useState<ToastState | null>(null);
   const [editError, setEditError] = useState<EditError | null>(null);
   const [noteErrors, setNoteErrors] = useState<Record<string, string>>({});
-  const [pickerError, setPickerError] = useState<{ courseId: number; message: string } | null>(null);
+  const [pickerError, setPickerError] = useState<PickerError | null>(null);
   const [pickerBusyId, setPickerBusyId] = useState<number | null>(null);
   const [generation, setGeneration] = useState<Generation>({ status: "idle" });
-  const [needs, setNeeds] = useState<Map<number, Need>>(new Map());
+  const generating = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!validId) return;
     let cancelled = false;
     (async () => {
       try {
-        const data = await loadBoard(planId);
+        const data = await loadBoardData(planId);
         if (!cancelled) setLoad({ status: "ready", data });
       } catch (e) {
-        if (!cancelled) setLoad(isMissing(e) ? { status: "missing" } : { status: "error", reason: reasonOf(e) });
+        if (cancelled) return;
+        setLoad(codeOf(e) === "plan_not_found" ? { status: "missing" } : { status: "error", reason: explain(e) });
       }
     })();
     return () => {
@@ -125,63 +184,21 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
     };
   }, [planId, validId, attempt]);
 
-  // Ask the API why each locked course is locked. That depends on the student's transcript, not on
-  // the plan, so it is fetched once and reused for notes, drag tooltips and the course picker.
-  const lockedKey =
-    load.status === "ready"
-      ? load.data.student.remaining
-          .filter((r) => !r.eligible)
-          .map((r) => r.course_id)
-          .join(",")
-      : "";
-  useEffect(() => {
-    if (!lockedKey) return;
-    let cancelled = false;
-    (async () => {
-      const checks = await Promise.all(
-        lockedKey.split(",").map(async (id) => {
-          try {
-            return [Number(id), await checkCourse(Number(planId), Number(id))] as const;
-          } catch {
-            return null; // the note just says "Locked"
-          }
-        }),
-      );
-      if (cancelled) return;
-      const found = new Map<number, Need>();
-      for (const entry of checks) {
-        if (!entry || entry[1].missing.length === 0) continue;
-        const what = entry[1].missing.join(" and ");
-        const issue = entry[1].problems.find((p) => p.type === "not_eligible");
-        found.set(entry[0], {
-          text: `Needs ${what}`,
-          sentence: issue?.message ?? `It needs ${what} first.`,
-          codes: what.match(COURSE_CODE) ?? [],
-        });
-      }
-      setNeeds(found);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [lockedKey, planId]);
-
   useEffect(() => {
     if (!toast) return;
-    const timer = setTimeout(() => setToast(null), 5000);
+    const timer = setTimeout(() => setToast(null), 7000);
     return () => clearTimeout(timer);
   }, [toast]);
 
   const board = useMemo(() => {
     if (load.status !== "ready") return null;
-    const labels = new Map([...needs].map(([id, need]) => [id, need.text]));
-    return buildBoard(load.data.plan, load.data.student, load.data.prerequisites, labels);
-  }, [load, needs]);
+    const { plan, options, prerequisites, extras, later } = load.data;
+    return buildBoard(plan, options, prerequisites, extras, later);
+  }, [load]);
 
-  const blockers = useCallback((course: BoardCourse) => needs.get(course.courseId ?? -1)?.codes ?? [], [needs]);
-  const openPicker = useCallback(() => {
+  const openPicker = useCallback((termCode: string) => {
     setPickerError(null);
-    setDialog({ kind: "picker" });
+    setDialog((current) => current ?? { kind: "picker", term: { code: termCode, name: termCode } });
   }, []);
 
   if (!validId || load.status === "missing") {
@@ -220,7 +237,7 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
             </Button>
           }
         >
-          We couldn&rsquo;t load this plan because {load.reason}.
+          We couldn&rsquo;t load this plan. {load.reason}
         </StateMessage>
       </Shell>
     );
@@ -249,138 +266,198 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
     );
   }
 
-  const { plan, student, prerequisites } = load.data;
+  const { plan, prerequisites, options, later } = load.data;
   const numericId = plan.plan.id;
-  const termName = plan.term.name;
+  const terms = planTerms(plan, later);
   const firstName = plan.plan.studentName.trim().split(/\s+/)[0];
   const selected = board.courses.find((c) => c.id === selectedId) ?? null;
-  const generating = generation.status === "running";
+  const isGenerating = generation.status === "running";
+  const frozen = busy || plan.readOnly;
 
   // ---- changing the plan
 
   // Runs one change, then reloads the board from the API so totals and the summary are current.
-  // Returns the plain-language reason if the API refused the change, or null if it went through.
-  async function change(action: () => Promise<unknown>): Promise<string | null> {
+  // Returns the API's refusal, or null if the change went through.
+  async function change(action: () => Promise<unknown>): Promise<PlanApiError | null> {
     setBusy(true);
+    setToast(null);
     setEditError(null);
     setNoteErrors({});
     try {
       await action();
     } catch (e) {
       setBusy(false);
-      return explain(e);
+      return e instanceof PlanApiError ? e : new PlanApiError("server_error");
     }
     try {
-      setLoad({ status: "ready", data: await loadBoard(numericId) });
+      setLoad({ status: "ready", data: await loadBoardData(numericId) });
     } catch (e) {
       // The change was saved but the board could not be re-read: show the load error with a retry.
-      setLoad({ status: "error", reason: reasonOf(e) });
+      setLoad({ status: "error", reason: explain(e) });
     }
     setBusy(false);
     return null;
   }
 
-  function refused(course: BoardCourse, title: string, message: string) {
-    setNoteErrors({ [course.id]: message });
-    setEditError({ title, message });
+  function refused(course: CourseRef, error: EditError) {
+    if (course.nodeId) setNoteErrors({ [course.nodeId]: error.message });
+    setEditError(error);
   }
 
-  async function addFromBoard(course: BoardCourse) {
-    if (course.courseId === null) return;
-    const reason = await change(() => addCourse(numericId, course.courseId!, advisor.id));
-    if (reason) return refused(course, `Can’t add ${course.code} to ${termName}`, reason);
-    setToast(`${course.code} added to ${termName}`);
+  async function add(course: CourseRef, term: TermRef) {
+    const error = await change(() => addCourse(numericId, course.courseId, term.code, advisor.id));
+    if (error) {
+      const next = error.suggestedTerm;
+      return refused(course, {
+        title: `Can’t add ${course.code} to ${term.name}`,
+        message: error.message,
+        action: next && next.code !== term.code ? { label: `Add to ${next.name}`, onClick: () => add(course, next) } : undefined,
+      });
+    }
     setSelectedId(`plan:${course.code}`);
+    // Undo after an add is a remove.
+    setToast({ message: `${course.code} added to ${term.name}`, undo: () => remove(course, term.name, false) });
   }
 
-  async function addFromPicker(course: PickerCourse) {
+  async function addFromPicker(course: CourseRef, term: TermRef) {
     setPickerError(null);
     setPickerBusyId(course.courseId);
-    const reason = await change(() => addCourse(numericId, course.courseId, advisor.id));
+    const error = await change(() => addCourse(numericId, course.courseId, term.code, advisor.id));
     setPickerBusyId(null);
-    if (reason) return setPickerError({ courseId: course.courseId, message: reason });
+    if (error) {
+      const next = error.suggestedTerm;
+      return setPickerError({
+        courseId: course.courseId,
+        message: error.message,
+        suggestedTerm: next && next.code !== term.code ? next : null,
+      });
+    }
     setDialog(null);
-    setToast(`${course.code} added to ${termName}`);
     setSelectedId(`plan:${course.code}`);
+    setToast({ message: `${course.code} added to ${term.name}`, undo: () => remove(course, term.name, false) });
   }
 
-  function dropLocked(course: BoardCourse) {
-    const need = needs.get(course.courseId ?? -1);
-    refused(
-      course,
-      `Can’t add ${course.code} to ${termName} yet`,
-      need?.sentence ?? `${course.code} has prerequisites that are not finished yet.`,
-    );
+  async function move(course: CourseRef, from: TermRef | null, to: TermRef, undoable = true) {
+    const error = await change(() => moveCourse(numericId, course.courseId, to.code, advisor.id));
+    if (error) {
+      const next = error.suggestedTerm;
+      return refused(course, {
+        title: `Can’t move ${course.code} to ${to.name}`,
+        message: error.message,
+        action:
+          next && next.code !== to.code && next.code !== from?.code
+            ? { label: `Move to ${next.name}`, onClick: () => move(course, from, next) }
+            : undefined,
+      });
+    }
+    setToast({
+      message: `${course.code} moved to ${to.name}`,
+      undo: undoable && from ? () => move(course, to, from, false) : undefined,
+    });
   }
 
-  async function confirmRemove(course: BoardCourse) {
-    if (!course.item) return;
-    const reason = await change(() => removeCourse(numericId, course.item!.id, advisor.id));
+  async function remove(course: CourseRef, termName: string, undoable = true) {
+    const error = await change(() => removeCourse(numericId, course.courseId, advisor.id));
     setDialog(null);
-    if (reason) return refused(course, `Can’t remove ${course.code}`, reason);
-    setToast(`${course.code} removed from ${termName}`);
-    if (selectedId === course.id) setSelectedId(null);
+    if (error) return refused(course, { title: `Can’t remove ${course.code}`, message: error.message });
+    if (selectedId === `plan:${course.code}`) setSelectedId(null);
+    setToast({ message: `${course.code} removed from ${termName}`, undo: undoable ? () => restore(course) : undefined });
+  }
+
+  async function restore(course: CourseRef) {
+    const error = await change(() => restoreCourse(numericId, course.courseId, advisor.id));
+    if (error) return setEditError({ title: `Can’t bring ${course.code} back`, message: error.message });
+    setToast({ message: `${course.code} is back in the plan` });
+  }
+
+  async function confirm(course: BoardCourse) {
+    const error = await change(() => confirmCourse(numericId, course.courseId, advisor.id));
+    if (error) return refused({ ...course, nodeId: course.id }, { title: `Can’t confirm ${course.code}`, message: error.message });
+    setToast({ message: `${course.code} confirmed` });
   }
 
   async function swap(course: BoardCourse, alternative: Alternative) {
-    if (!course.item) return;
-    const reason = await change(() => swapCourse(numericId, course.item!.id, alternative.courseId, advisor.id));
-    if (reason) return refused(course, `Can’t swap ${course.code} for ${alternative.code}`, reason);
-    setToast(`${alternative.code} swapped in for ${course.code}`);
+    const error = await change(() => swapCourse(numericId, course.courseId, alternative.courseId, advisor.id));
+    if (error) {
+      return refused(
+        { ...course, nodeId: course.id },
+        { title: `Can’t swap ${course.code} for ${alternative.code}`, message: error.message },
+      );
+    }
     setSelectedId(`plan:${alternative.code}`);
+    setToast({ message: `${alternative.code} swapped in for ${course.code}` });
   }
 
-  async function generate() {
+  // A note was dropped on one of its target bands. `missing` is what the board already knows the
+  // course still needs for that term; when it is not empty nothing is sent.
+  function drop(course: BoardCourse, column: BoardColumn, missing: string[]) {
+    const ref = { courseId: course.courseId, code: course.code, nodeId: course.id };
+    if (missing.length > 0) {
+      const fits = terms.find((term) => course.fit[term.code]?.met);
+      return refused(ref, {
+        title: `Can’t add ${course.code} to ${column.title} yet`,
+        message: `${course.code} needs ${missing.join(" and ")} first.`,
+        action: fits ? { label: `Add to ${fits.name}`, onClick: () => add(ref, fits) } : undefined,
+      });
+    }
+    if (column.where === "unplanned") return openRemove(course);
+    const term = { code: column.termCode!, name: column.title };
+    if (course.drag === "unplanned") return void add(ref, term);
+    void move(ref, course.termCode ? { code: course.termCode, name: course.termLabel } : null, term);
+  }
+
+  function openRemove(course: BoardCourse) {
+    setDialog({ kind: "remove", course });
+    setDependents({ status: "loading" });
+    getDependents(numericId, course.courseId).then(
+      (list) => setDependents({ status: "ready", list }),
+      () => setDependents({ status: "unknown" }),
+    );
+  }
+
+  // ---- generating a draft
+
+  async function generate(replace: boolean) {
+    const controller = new AbortController();
+    generating.current = controller;
     setDialog(null);
     setBusy(true);
+    setToast(null);
     setEditError(null);
     setNoteErrors({});
     setGeneration({ status: "running" });
     try {
-      const created = await generatePlan(plan.plan.studentId, advisor.id);
+      const created = await generatePlan(plan.plan.studentId, advisor.id, replace, controller.signal);
       // A new draft is a new plan with its own id. `busy` stays on until that page takes over.
       router.replace(`/plans/${created.plan.id}${window.location.search}`);
+      return;
     } catch (e) {
-      const reason = explain(e);
-      const unsure = reason.includes("too long") || reason.includes("connection");
-      setGeneration({
-        status: "failed",
-        message: unsure
-          ? `${reason} The planner may still finish, so reload in a moment to check.`
-          : `${reason} Nothing on the board changed.`,
-      });
+      const error = e instanceof PlanApiError ? e : new PlanApiError("server_error");
+      if (error.code === "plan_exists" && error.existing) {
+        setGeneration({ status: "idle" });
+        setDialog({ kind: "generate", planId: error.existing.planId, status: error.existing.status });
+      } else if (error.code === "cancelled") {
+        setGeneration({ status: "idle" });
+      } else {
+        const retryable = !["plan_approved", "no_candidates", "student_not_found"].includes(error.code);
+        const lead = error.code === "plan_approved" ? "" : "Couldn’t generate a draft plan. ";
+        setGeneration({ status: "failed", message: `${lead}${error.message}`, retry: retryable ? () => generate(replace) : null });
+      }
       setBusy(false);
     }
   }
 
-  // ---- derived for the dialogs
-
-  const plannedIds = new Set(plan.items.map((item) => item.courseId));
-  const rank = { eligible: 0, locked: 1, planned: 2 };
-  const pickerCourses: PickerCourse[] = student.remaining
-    .map((r) => ({
-      courseId: r.course_id,
-      code: r.code,
-      title: r.title,
-      group: humanize(r.group_label ?? r.category ?? "Other"),
-      pick: r.pick_count,
-      state: plannedIds.has(r.course_id) ? ("planned" as const) : r.eligible ? ("eligible" as const) : ("locked" as const),
-      needs: needs.get(r.course_id)?.text ?? null,
-    }))
-    .sort((a, b) => rank[a.state] - rank[b.state]);
-
-  const affectedBy = (course: BoardCourse) => {
-    const dependents = new Set(unlockedBy(course.code, prerequisites));
-    return plan.items.filter((item) => dependents.has(item.code)).map((item) => ({ code: item.code, title: item.title }));
-  };
+  const pickerTerm = dialog?.kind === "picker" ? (terms.find((t) => t.code === dialog.term.code) ?? dialog.term) : null;
+  const edited = new Date(plan.plan.updatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const planned = plan.terms.filter((t) => t.state === "planned");
 
   return (
     <Shell
       advisor={advisor}
       generate={{
-        label: generating ? "Generating…" : "Generate draft plan",
+        label: isGenerating ? "Generating…" : "Generate draft plan",
         disabled: busy,
-        onClick: () => setDialog({ kind: "generate" }),
+        onClick: () => generate(false),
       }}
       left={
         <>
@@ -390,7 +467,7 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
             <span className="flex min-w-0 flex-col">
               <span className="truncate text-label-16 text-ink-primary">{plan.plan.studentName}</span>
               <span className="truncate text-caption-12-regular text-ink-secondary">
-                {[plan.plan.programName, student.student.expected_graduation].filter(Boolean).join(" · ")}
+                {[plan.plan.programName, load.data.extras?.expectedGraduation].filter(Boolean).join(" · ")}
               </span>
             </span>
           </span>
@@ -401,31 +478,27 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
       <div className="relative min-w-0 flex-1" aria-busy={busy}>
         <BoardCanvas
           board={board}
-          planTerm={termName}
           selectedId={selectedId}
           onSelect={setSelectedId}
-          locked={busy}
+          locked={frozen}
           noteErrors={noteErrors}
-          blockers={blockers}
           onAdd={openPicker}
-          onDropAdd={addFromBoard}
-          onDropRemove={(course) => setDialog({ kind: "remove", course })}
-          onDropLocked={dropLocked}
+          onDrop={drop}
         />
-        {generating ? (
-          <GeneratingBanner />
+        {isGenerating ? (
+          <GeneratingBanner onCancel={() => generating.current?.abort()} />
         ) : generation.status === "failed" ? (
-          <FailedBanner
+          <NoticeBanner
             message={generation.message}
-            onRetry={generate}
+            onRetry={generation.retry ?? undefined}
             onDismiss={() => setGeneration({ status: "idle" })}
           />
         ) : (
-          toast && <Toast message={toast} />
+          toast && <Toast message={toast.message} undo={toast.undo && { disabled: busy, onClick: toast.undo }} />
         )}
       </div>
 
-      {generating ? (
+      {isGenerating ? (
         <PlanPanelSkeleton />
       ) : (
         <PlanPanel
@@ -434,46 +507,63 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
           prerequisites={prerequisites}
           selected={selected}
           busy={busy}
+          terms={terms}
           editError={editError}
           onDismissError={() => {
             setEditError(null);
             setNoteErrors({});
           }}
           onSelect={setSelectedId}
-          onAdd={addFromBoard}
+          onAdd={(course, term) => add({ courseId: course.courseId, code: course.code, nodeId: course.id }, term)}
+          onMove={(course, term) =>
+            move(
+              { courseId: course.courseId, code: course.code, nodeId: course.id },
+              course.termCode ? { code: course.termCode, name: course.termLabel } : null,
+              term,
+            )
+          }
+          onConfirm={confirm}
           onSwap={swap}
-          onRemove={(course) => setDialog({ kind: "remove", course })}
+          onRemove={openRemove}
         />
       )}
 
       {dialog?.kind === "generate" && (
         <GenerateDialog
           firstName={firstName}
-          status={plan.plan.status}
-          updatedAt={plan.plan.updatedAt}
-          courses={plan.totals.courses}
-          termName={termName}
-          onKeep={() => setDialog(null)}
-          onGenerate={generate}
+          status={dialog.status}
+          isThisPlan={dialog.planId === numericId}
+          summary={
+            dialog.planId === numericId
+              ? `last edited ${edited}, with ${plan.totals.courses} ${plan.totals.courses === 1 ? "course" : "courses"} ${
+                  planned.length === 1 ? `in ${planned[0].name}` : `across ${planned.length} terms`
+                }`
+              : null
+          }
+          onOpenExisting={() => router.push(`/plans/${dialog.planId}${window.location.search}`)}
+          onGenerate={() => generate(true)}
+          onClose={() => setDialog(null)}
         />
       )}
       {dialog?.kind === "remove" && (
         <RemoveDialog
           code={dialog.course.code}
-          termName={termName}
-          affected={affectedBy(dialog.course)}
+          termName={dialog.course.termLabel}
+          dependents={dependents}
           busy={busy}
           onCancel={() => setDialog(null)}
-          onRemove={() => confirmRemove(dialog.course)}
+          onRemove={() =>
+            remove({ courseId: dialog.course.courseId, code: dialog.course.code, nodeId: dialog.course.id }, dialog.course.termLabel)
+          }
         />
       )}
-      {dialog?.kind === "picker" && (
+      {pickerTerm && (
         <CoursePicker
-          termName={termName}
-          courses={pickerCourses}
+          options={options[pickerTerm.code] ?? null}
           busyId={pickerBusyId}
           error={pickerError}
-          onAdd={addFromPicker}
+          onAdd={(course) => addFromPicker(course, pickerTerm)}
+          onAddTo={(course, term) => addFromPicker(course, term)}
           onClose={() => setDialog(null)}
         />
       )}

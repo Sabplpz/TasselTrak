@@ -1,10 +1,31 @@
-// Every API call the plan canvas makes lives here, with the shapes it relies on. If a route
-// changes, this is the only file that needs fixing.
-import { FetchError, getJson } from "@/lib/fetchJson";
+// Every API call the plan canvas makes lives here, with the shapes it relies on and the one table
+// that turns API error codes into plain language. If a route changes, this is the only file that
+// needs fixing. Routes and shapes follow web/API.md ("Plans").
 
 // ---------------------------------------------------------------- shapes
 
 export type PlanIssue = { type: string; severity: "high" | "medium" | "low"; message: string };
+
+export type TermRef = { code: string; name: string };
+
+// One column of the board. Completed and current terms hold `history`, planned terms hold `items`.
+export type PlanTerm = TermRef & {
+  state: "completed" | "current" | "planned";
+  now: boolean;
+  label: string; // "Completed" | "In progress" | "Up next" | "Later"
+  credits: number;
+  courses: number;
+};
+
+export type HistoryCourse = {
+  courseId: number;
+  code: string;
+  title: string;
+  credits: number;
+  grade: string | null;
+  status: "taken" | "in_progress" | "not_passed";
+  termCode: string | null;
+};
 
 export type PlanItem = {
   id: number;
@@ -12,8 +33,14 @@ export type PlanItem = {
   code: string;
   title: string;
   credits: number;
+  termCode: string;
+  termName: string;
   reason: string | null;
   source: "ai" | "advisor";
+  suggested: boolean; // proposed by the planner and not confirmed yet
+  fills: string | null;
+  status: "available" | "needs" | "locked";
+  needs: string[]; // what it is waiting on, one entry per prerequisite group
   section: {
     section_code: string | null;
     modality: string | null;
@@ -27,7 +54,7 @@ export type PlanItem = {
   issues: PlanIssue[];
 };
 
-// The "plan object" returned by GET /api/plans/:id and by every route that changes a plan.
+// The "plan object": returned by GET /api/plans/:id and by every route that changes a plan.
 export type PlanResponse = {
   plan: {
     id: number;
@@ -38,39 +65,32 @@ export type PlanResponse = {
     createdBy: "ai" | "advisor";
     modelName: string | null;
     rationale: string | null;
+    rationalePoints: string[] | null;
     updatedAt: string;
   };
-  term: { code: string; name: string };
+  term: TermRef; // the first planned term
+  terms: PlanTerm[];
+  history: HistoryCourse[];
   items: PlanItem[];
-  totals: { credits: number; target: number; courses: number };
+  totals: { credits: number; target: number; courses: number; byTerm: { code: string; credits: number }[] };
   issues: PlanIssue[];
+  readOnly: boolean; // approved plans cannot be edited until they are reopened
 };
 
-export type RemainingCourse = {
-  course_id: number;
+// GET /api/plans/:id/course-options?term=
+export type CourseOption = {
+  courseId: number;
   code: string;
   title: string;
   credits: number;
   category: string | null;
-  group_label: string | null;
-  pick_count: number | null;
-  critical_path: boolean;
-  depth: number;
-  eligible: boolean;
+  criticalPath: boolean;
+  prerequisitesMet: boolean; // judged for the requested term
+  missing: string[];
 };
-
-// GET /api/students/:id (the parts the board reads)
-export type StudentResponse = {
-  student: { expected_graduation: string | null };
-  completed: {
-    code: string;
-    title: string;
-    credits: number;
-    grade: string | null;
-    term: string | null;
-    in_progress: boolean;
-  }[];
-  remaining: RemainingCourse[];
+export type CourseOptions = {
+  term: TermRef & { open: boolean };
+  groups: { requirement: string; fills: string | null; courses: CourseOption[] }[];
 };
 
 // GET /api/plans/:id/prerequisites
@@ -82,70 +102,106 @@ export type Prerequisite = {
   minGrade: string | null;
 };
 
-// GET /api/plans/:id/alternatives
-export type Alternative = {
-  courseId: number;
-  code: string;
-  title: string;
-  credits: number;
-  category: string | null;
-  criticalPath: boolean;
-  isSlot: boolean;
-  seatsOpen: number | null;
-};
+// GET /api/plans/:id/courses/:courseId/alternatives
+export type Alternative = { courseId: number; code: string; title: string; credits: number; criticalPath: boolean };
 
-// POST /api/plans/:id/items with dryRun: the checks, without changing anything
-export type CourseCheck = {
-  eligible: boolean;
-  missing: string[]; // one entry per unmet prerequisite group, e.g. "COP 3502C" or "MAC 2311C or MAC 2281"
-  problems: PlanIssue[];
-  blocking: boolean;
-};
-
-export type PlanBoardData = { plan: PlanResponse; student: StudentResponse; prerequisites: Prerequisite[] };
+// GET /api/plans/:id/courses/:courseId/dependents
+export type Dependent = { courseId: number; code: string; title: string; termName: string; direct: boolean };
 
 // ---------------------------------------------------------------- errors
 
-// A change the API refused or could not make. `message` is plain language, ready to show.
+// What each API error code means, in plain language. Codes come from `{ error, code }` bodies.
+// `check_failed` is not here: its message is built from the API's own `problems`.
+const MESSAGES: Record<string, string> = {
+  // not found
+  plan_not_found: "This plan no longer exists.",
+  item_not_found: "That course is no longer in this plan.",
+  course_not_found: "That course could not be found.",
+  student_not_found: "This student could not be found.",
+  term_not_found: "That term isn’t available for planning.",
+  no_plan: "This student doesn’t have a plan yet.",
+  // the plan can't be edited right now
+  read_only: "This plan is approved and read-only. Reopen it to make changes.",
+  archived: "This plan was replaced by a newer draft. Open the student’s current plan to make changes.",
+  // undo
+  nothing_to_restore: "There is nothing to undo for that course.",
+  already_in_plan: "That course is already back in the plan.",
+  // generating a draft
+  plan_exists: "This student already has a plan.",
+  plan_approved: "This plan is approved. Reopen it before generating a new draft.",
+  planner_timeout: "The planner timed out before it finished, so nothing on the board changed.",
+  planner_failed: "The planner couldn’t finish the draft, so nothing on the board changed.",
+  no_candidates: "There are no eligible courses with open sections to build a draft from.",
+  cancelled: "Generating the draft was cancelled. Nothing was changed.",
+  // overrides and approval (next pass, listed so nothing falls through)
+  not_authorized: "You aren’t authorized to override problems on a plan.",
+  advisor_required: "Sign in as an advisor to do that.",
+  note_required: "A written reason is needed to override a problem.",
+  nothing_to_override: "That course has no problem to override.",
+  blocking_issues: "This plan still has problems that block approval.",
+  already_approved: "This plan is already approved.",
+  empty_plan: "This plan has no courses yet.",
+  invalid_status: "The plan isn’t in the right state for that.",
+  // ours, for failures that never reached the API
+  invalid_request: "That request wasn’t valid.",
+  server_error: "The server ran into a problem.",
+  timeout: "The server took too long to answer.",
+  offline: "The connection dropped.",
+  unreadable: "The server sent a response we couldn’t read.",
+};
+
+type ErrorBody = {
+  error?: string;
+  code?: string;
+  problems?: PlanIssue[];
+  suggestedTerm?: TermRef | null;
+  planId?: number;
+  status?: PlanResponse["plan"]["status"];
+};
+
+// A request the API refused or could not complete. `message` is plain language, ready to show.
 export class PlanApiError extends Error {
-  problems: PlanIssue[];
-  constructor(message: string, problems: PlanIssue[] = []) {
-    super(message);
-    this.problems = problems;
+  code: string;
+  // check_failed: the earliest later term where the change would be allowed, if there is one
+  suggestedTerm: TermRef | null;
+  // plan_exists / plan_approved: the plan that is in the way
+  existing: { planId: number; status: PlanResponse["plan"]["status"] } | null;
+
+  constructor(code: string, body: ErrorBody = {}) {
+    const blocking = (body.problems ?? []).filter((p) => p.severity === "high");
+    const shown = blocking.length > 0 ? blocking : (body.problems ?? []);
+    super(
+      code === "check_failed" && shown.length > 0
+        ? shown.map((p) => p.message).join(" ")
+        : (MESSAGES[code] ?? MESSAGES.server_error),
+    );
+    this.code = code;
+    this.suggestedTerm = body.suggestedTerm ?? null;
+    this.existing = body.planId ? { planId: body.planId, status: body.status ?? "draft" } : null;
   }
 }
 
-// Server error texts that are already written for people. Anything else gets a general message,
-// so raw database or runtime errors never reach the page.
-const READABLE: Record<string, string> = {
-  "Plan not found": "This plan no longer exists.",
-  "Plan item not found": "That course is no longer in the plan.",
-  "Course not found": "That course could not be found.",
-  "Student not found": "This student could not be found.",
-  "No eligible courses with sections next term": "There are no eligible courses with open sections next term.",
-  "Could not build a plan from the eligible courses": "The planner could not build a plan from the eligible courses.",
-};
+// Plain-language reason for any failure from this file.
+export const explain = (e: unknown) => (e instanceof PlanApiError ? e.message : MESSAGES.server_error);
+export const codeOf = (e: unknown) => (e instanceof PlanApiError ? e.code : "server_error");
 
-function refusal(body: { error?: string; problems?: PlanIssue[] }): PlanApiError {
-  const problems = body.problems ?? [];
-  const blocking = problems.filter((p) => p.severity === "high");
-  const shown = blocking.length > 0 ? blocking : problems;
-  if (shown.length > 0) return new PlanApiError(shown.map((p) => p.message).join(" "), problems);
-  return new PlanApiError(READABLE[body.error ?? ""] ?? "The server ran into a problem.");
-}
-
-async function send<T>(method: "POST" | "PUT" | "DELETE", url: string, body?: object, timeoutMs = 20000): Promise<T> {
+async function request<T>(
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+  url: string,
+  body?: object,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<T> {
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? 20000);
   let res: Response;
   try {
     res = await fetch(url, {
       method,
       headers: body ? { "content-type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
     });
-  } catch (e) {
-    const timedOut = e instanceof DOMException && e.name === "TimeoutError";
-    throw new PlanApiError(timedOut ? "The server took too long to answer." : "The connection dropped.");
+  } catch {
+    throw new PlanApiError(options.signal?.aborted ? "cancelled" : timeout.aborted ? "timeout" : "offline");
   }
   let parsed: unknown = null;
   try {
@@ -153,62 +209,86 @@ async function send<T>(method: "POST" | "PUT" | "DELETE", url: string, body?: ob
   } catch {
     // handled below: an unreadable body is only acceptable on a failure
   }
-  if (!res.ok) throw refusal((parsed ?? {}) as { error?: string; problems?: PlanIssue[] });
-  if (parsed === null) throw new PlanApiError("The server sent a response we couldn’t read.");
+  if (!res.ok) {
+    const failure = (parsed ?? {}) as ErrorBody;
+    throw new PlanApiError(failure.code ?? "server_error", failure);
+  }
+  if (parsed === null) throw new PlanApiError("unreadable");
   return parsed as T;
 }
 
-// Plain-language reason for any failure from this file.
-export function explain(e: unknown): string {
-  if (e instanceof PlanApiError) return e.message;
-  if (e instanceof FetchError) return `${e.message.charAt(0).toUpperCase()}${e.message.slice(1)}.`;
-  return "Something went wrong.";
+// ---------------------------------------------------------------- reading
+
+// GET /api/plans/:id -> plan object. 404 plan_not_found.
+export const getPlan = (planId: string | number) => request<PlanResponse>("GET", `/api/plans/${planId}`);
+
+// GET /api/plans/:id/prerequisites -> prerequisite edges for the student's program.
+export async function getPrerequisites(planId: number) {
+  return (await request<{ prerequisites: Prerequisite[] }>("GET", `/api/plans/${planId}/prerequisites`)).prerequisites;
 }
 
-// True when the plan itself is gone (the page shows "plan not found" instead of an error).
-export const isMissing = (e: unknown) => e instanceof FetchError && e.status === 404;
+// GET /api/plans/:id/course-options?term= -> what can still be added to that term. 404 term_not_found.
+export const getCourseOptions = (planId: number, termCode: string) =>
+  request<CourseOptions>("GET", `/api/plans/${planId}/course-options?term=${encodeURIComponent(termCode)}`);
 
-// ---------------------------------------------------------------- calls
-
-// Everything the board needs: the plan, the student's transcript and remaining requirements, and
-// the prerequisite edges. Throws FetchError (see isMissing).
-export async function loadBoard(planId: string | number): Promise<PlanBoardData> {
-  const plan = await getJson<PlanResponse>(`/api/plans/${planId}`);
-  const [student, edges] = await Promise.all([
-    getJson<StudentResponse>(`/api/students/${plan.plan.studentId}`),
-    getJson<{ prerequisites: Prerequisite[] }>(`/api/plans/${planId}/prerequisites`),
-  ]);
-  return { plan, student, prerequisites: edges.prerequisites };
+// GET /api/students/:id -> the two things the plan object does not carry: the expected graduation
+// term for the top bar, and how deep each remaining course sits in its prerequisite chain.
+export async function getStudentExtras(studentId: number) {
+  const body = await request<{
+    student: { expected_graduation: string | null };
+    remaining: { course_id: number; depth: number; critical_path: boolean }[];
+  }>("GET", `/api/students/${studentId}`);
+  return {
+    expectedGraduation: body.student.expected_graduation,
+    depth: new Map(body.remaining.map((r) => [r.course_id, r.depth])),
+    critical: new Set(body.remaining.filter((r) => r.critical_path).map((r) => r.course_id)),
+  };
 }
+export type StudentExtras = Awaited<ReturnType<typeof getStudentExtras>>;
 
-// POST /api/plans/:id/items { courseId, dryRun: true } -> would this course be allowed? Changes nothing.
-export function checkCourse(planId: number, courseId: number) {
-  return send<CourseCheck>("POST", `/api/plans/${planId}/items`, { courseId, dryRun: true });
-}
-
-// POST /api/plans/:id/items { courseId, advisorId } -> 201 plan object. 422 { problems, missing } if blocked.
-export function addCourse(planId: number, courseId: number, advisorId: number) {
-  return send<PlanResponse>("POST", `/api/plans/${planId}/items`, { courseId, advisorId });
-}
-
-// PUT /api/plans/:id/items/:itemId { courseId, advisorId } -> plan object. 422 { problems, missing } if blocked.
-export function swapCourse(planId: number, itemId: number, courseId: number, advisorId: number) {
-  return send<PlanResponse>("PUT", `/api/plans/${planId}/items/${itemId}`, { courseId, advisorId });
-}
-
-// DELETE /api/plans/:id/items/:itemId?advisorId= -> plan object. 404 if the item is already gone.
-export function removeCourse(planId: number, itemId: number, advisorId: number) {
-  return send<PlanResponse>("DELETE", `/api/plans/${planId}/items/${itemId}?advisorId=${advisorId}`);
-}
-
-// GET /api/plans/:id/alternatives?itemId= -> courses the student could take instead of this item.
-export async function getAlternatives(planId: number, itemId: number) {
-  const body = await getJson<{ alternatives: Alternative[] }>(`/api/plans/${planId}/alternatives?itemId=${itemId}`);
+// GET /api/plans/:id/courses/:courseId/alternatives -> courses that could replace this one.
+export async function getAlternatives(planId: number, courseId: number) {
+  const body = await request<{ alternatives: Alternative[] }>("GET", `/api/plans/${planId}/courses/${courseId}/alternatives`);
   return body.alternatives;
 }
 
-// POST /api/students/:id/plan { advisorId } -> 201 plan object for a NEW plan (new id). The
-// student's draft and in-review plans are archived. Takes a few seconds, up to about a minute.
-export function generatePlan(studentId: number, advisorId: number) {
-  return send<PlanResponse>("POST", `/api/students/${studentId}/plan`, { advisorId }, 75000);
+// GET /api/plans/:id/courses/:courseId/dependents -> planned courses that stop being valid if this one leaves.
+export async function getDependents(planId: number, courseId: number) {
+  const body = await request<{ dependents: Dependent[] }>("GET", `/api/plans/${planId}/courses/${courseId}/dependents`);
+  return body.dependents;
 }
+
+// ---------------------------------------------------------------- changing a plan
+// Each returns the updated plan object. 422 check_failed when the checks block the change,
+// 409 read_only on an approved plan.
+
+// POST /api/plans/:id/courses { courseId, termCode, advisorId }
+export const addCourse = (planId: number, courseId: number, termCode: string, advisorId: number) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/courses`, { courseId, termCode, advisorId });
+
+// PATCH /api/plans/:id/courses/:courseId { termCode, advisorId } -> move to another term
+export const moveCourse = (planId: number, courseId: number, termCode: string, advisorId: number) =>
+  request<PlanResponse>("PATCH", `/api/plans/${planId}/courses/${courseId}`, { termCode, advisorId });
+
+// PUT /api/plans/:id/courses/:courseId { newCourseId, advisorId } -> swap, in the same term
+export const swapCourse = (planId: number, courseId: number, newCourseId: number, advisorId: number) =>
+  request<PlanResponse>("PUT", `/api/plans/${planId}/courses/${courseId}`, { newCourseId, advisorId });
+
+// DELETE /api/plans/:id/courses/:courseId?advisorId=
+export const removeCourse = (planId: number, courseId: number, advisorId: number) =>
+  request<PlanResponse>("DELETE", `/api/plans/${planId}/courses/${courseId}?advisorId=${advisorId}`);
+
+// POST /api/plans/:id/courses/:courseId/restore -> undo a remove. 404 nothing_to_restore.
+export const restoreCourse = (planId: number, courseId: number, advisorId: number) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/courses/${courseId}/restore`, { advisorId });
+
+// POST /api/plans/:id/courses/:courseId/confirm -> a suggested course becomes confirmed
+export const confirmCourse = (planId: number, courseId: number, advisorId: number) =>
+  request<PlanResponse>("POST", `/api/plans/${planId}/courses/${courseId}/confirm`, { advisorId });
+
+// POST /api/students/:id/plan/generate { advisorId, replace } -> 201 plan object for a NEW plan.
+// 409 plan_exists { planId, status } unless `replace` is true; 409 plan_approved; 504
+// planner_timeout / planner_failed (nothing changed). One request of up to about 50 seconds.
+// Aborting `signal` cancels it and the server saves nothing.
+export const generatePlan = (studentId: number, advisorId: number, replace: boolean, signal: AbortSignal) =>
+  request<PlanResponse>("POST", `/api/students/${studentId}/plan/generate`, { advisorId, replace }, { timeoutMs: 75000, signal });

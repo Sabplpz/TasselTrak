@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { Button } from "@/components/Button";
+import { Button, TextButton } from "@/components/Button";
+import type { CourseOption, CourseOptions, Dependent, TermRef } from "@/lib/planApi";
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+const humanize = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 // Modal dialog: closes on Escape or a click outside, keeps Tab inside, and puts focus on the
 // element marked data-autofocus (or the first control) when it opens.
@@ -71,51 +73,48 @@ export function Modal({
 
 const STATUS_TEXT = { draft: "a draft", in_review: "in review", approved: "approved", archived: "archived" };
 
-// Shown before generating: this page always has a plan open, so a new draft always replaces one.
+// Shown when the API answers "plan_exists": the student already has a live plan.
 export function GenerateDialog({
   firstName,
   status,
-  updatedAt,
-  courses,
-  termName,
-  onKeep,
+  summary,
+  isThisPlan,
+  onOpenExisting,
   onGenerate,
+  onClose,
 }: {
   firstName: string;
-  status: keyof typeof STATUS_TEXT;
-  updatedAt: string;
-  courses: number;
-  termName: string;
-  onKeep: () => void;
+  status: keyof typeof STATUS_TEXT; // of the existing plan, from the API
+  summary: string | null; // details of the existing plan, when it is the one on screen
+  isThisPlan: boolean;
+  onOpenExisting: () => void;
   onGenerate: () => void;
+  onClose: () => void;
 }) {
-  const edited = new Date(updatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" });
   return (
     <Modal
       scrim
       label={`${firstName} already has a plan`}
-      onClose={onKeep}
+      onClose={onClose}
       className="flex w-full max-w-[520px] flex-col gap-[18px] rounded-panel bg-surface-card px-7 pb-6 pt-[26px] shadow-panel"
     >
       <div className="flex flex-col gap-1.5">
         <h2 className="text-heading-28 text-ink-primary">{firstName} already has a plan</h2>
         <p className="text-body-16 text-ink-secondary">
-          It&rsquo;s {STATUS_TEXT[status]}, last edited {edited}, with {courses} {courses === 1 ? "course" : "courses"} in{" "}
-          {termName}.
+          It&rsquo;s {STATUS_TEXT[status]}
+          {summary ? `, ${summary}` : ""}.
         </p>
       </div>
       <div className="flex flex-wrap gap-[10px]">
-        <Button full={false} onClick={onKeep} data-autofocus>
-          Keep this plan
+        <Button full={false} onClick={isThisPlan ? onClose : onOpenExisting} data-autofocus>
+          {isThisPlan ? "Keep this plan" : "Open existing plan"}
         </Button>
         <Button variant="secondary" full={false} onClick={onGenerate}>
           Generate a new draft
         </Button>
       </div>
       <p className="text-caption-12-regular text-ink-secondary">
-        {status === "approved"
-          ? "A new draft becomes the current plan and starts from scratch. The approved plan is kept."
-          : "A new draft starts from scratch. This plan is archived, including any courses you added."}
+        A new draft starts from scratch. The existing plan is archived, including any courses you added.
       </p>
     </Modal>
   );
@@ -123,17 +122,19 @@ export function GenerateDialog({
 
 // ---------------------------------------------------------------- remove a course
 
+export type Dependents = { status: "loading" } | { status: "unknown" } | { status: "ready"; list: Dependent[] };
+
 export function RemoveDialog({
   code,
   termName,
-  affected,
+  dependents,
   busy,
   onCancel,
   onRemove,
 }: {
   code: string;
   termName: string;
-  affected: { code: string; title: string }[]; // planned courses that list this one as a prerequisite
+  dependents: Dependents; // planned courses that stop being valid if this one leaves
   busy: boolean;
   onCancel: () => void;
   onRemove: () => void;
@@ -147,18 +148,24 @@ export function RemoveDialog({
       <h2 className="text-label-16 text-ink-primary">
         Remove {code} from {termName}?
       </h2>
-      {affected.length > 0 && (
+      {dependents.status === "loading" && <p className="text-caption-12-regular text-ink-secondary">Checking what this affects…</p>}
+      {dependents.status === "unknown" && (
+        <p className="text-caption-12-regular text-ink-secondary">We couldn&rsquo;t check which other courses this affects.</p>
+      )}
+      {dependents.status === "ready" && dependents.list.length > 0 && (
         <div className="flex flex-col gap-2 rounded-field border border-border-subtle bg-surface-canvas px-3 py-[10px]">
           <h3 className="text-overline-12 uppercase text-ink-secondary">This also affects</h3>
-          {affected.map((course) => (
-            <div key={course.code} className="flex items-start gap-2">
+          {dependents.list.map((course) => (
+            <div key={course.courseId} className="flex items-start gap-2">
               <Image src="/plan/affected.svg" alt="" width={16} height={16} className="mt-0.5 flex-none" />
               <div className="flex min-w-0 flex-col gap-0.5">
                 <p className="text-label-14 text-ink-primary">
                   {course.code} · {course.title}
                 </p>
                 <p className="text-caption-12-regular text-ink-secondary">
-                  It lists {code} as a prerequisite, so it may show a conflict.
+                  {course.direct
+                    ? `It needs ${code}, so it will show a conflict in ${course.termName}.`
+                    : `It depends on a course that needs ${code}, so it will show a conflict in ${course.termName}.`}
                 </p>
               </div>
             </div>
@@ -179,42 +186,37 @@ export function RemoveDialog({
 
 // ---------------------------------------------------------------- add a course
 
-export type PickerCourse = {
-  courseId: number;
-  code: string;
-  title: string;
-  group: string; // requirement category, e.g. "Core"
-  pick: number | null; // "pick N" for groups where only some courses are needed
-  state: "eligible" | "locked" | "planned";
-  needs: string | null; // for locked courses: "Needs COP 3502C"
-};
-
 const CHIP = "flex flex-none items-center gap-[5px] rounded-pill py-[3px] pl-[7px] pr-[10px] text-caption-12 whitespace-nowrap";
 
+export type PickerError = { courseId: number; message: string; suggestedTerm: TermRef | null };
+
 export function CoursePicker({
-  termName,
-  courses,
+  options,
   busyId,
   error,
   onAdd,
+  onAddTo,
   onClose,
 }: {
-  termName: string;
-  courses: PickerCourse[];
+  options: CourseOptions | null; // null: the list for this term could not be loaded
   busyId: number | null; // the course being added, while the request is in flight
-  error: { courseId: number; message: string } | null;
-  onAdd: (course: PickerCourse) => void;
+  error: PickerError | null;
+  onAdd: (course: CourseOption) => void;
+  onAddTo: (course: CourseOption, term: TermRef) => void; // "Add to <later term> instead"
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const termName = options?.term.name ?? "this term";
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const shown = courses.filter((c) => !q || c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q));
-    const byGroup = new Map<string, PickerCourse[]>();
-    for (const course of shown) byGroup.set(course.group, [...(byGroup.get(course.group) ?? []), course]);
-    return [...byGroup.entries()];
-  }, [courses, query]);
+    return (options?.groups ?? [])
+      .map((group) => ({
+        ...group,
+        courses: group.courses.filter((c) => !q || c.code.toLowerCase().includes(q) || c.title.toLowerCase().includes(q)),
+      }))
+      .filter((group) => group.courses.length > 0);
+  }, [options, query]);
 
   return (
     <Modal
@@ -248,29 +250,24 @@ export function CoursePicker({
       </label>
 
       <div className="-mx-[18px] flex min-h-0 flex-col gap-[10px] overflow-y-auto px-[18px]">
-        {groups.length === 0 && <p className="py-4 text-body-14 text-ink-secondary">No remaining courses match.</p>}
-        {groups.map(([group, rows]) => (
-          <section key={group} className="flex flex-col gap-[10px]">
-            <div className="flex items-center justify-between pt-1.5 text-ink-secondary">
-              <h3 className="text-overline-12 uppercase">{group}</h3>
-              {rows[0].pick !== null && <span className="text-caption-12-regular">pick {rows[0].pick}</span>}
-            </div>
+        {!options ? (
+          <p role="alert" className="py-4 text-body-14 text-ink-primary">
+            We couldn&rsquo;t load the courses for this term. Close this and try again.
+          </p>
+        ) : (
+          groups.length === 0 && <p className="py-4 text-body-14 text-ink-secondary">No remaining courses match.</p>
+        )}
+        {groups.map((group) => (
+          <section key={group.requirement} className="flex flex-col gap-[10px]">
+            <h3 className="pt-1.5 text-overline-12 uppercase text-ink-secondary">{humanize(group.fills ?? group.requirement)}</h3>
             <ul className="flex flex-col">
-              {rows.map((course) => {
-                const failed = error?.courseId === course.courseId;
+              {group.courses.map((course) => {
+                const failed = error?.courseId === course.courseId ? error : null;
                 const adding = busyId === course.courseId;
                 const text = (
                   <>
-                    <span
-                      className={`w-[92px] flex-none text-label-14 ${course.state === "planned" ? "text-ink-muted" : "text-ink-primary"}`}
-                    >
-                      {course.code}
-                    </span>
-                    <span
-                      className={`min-w-0 flex-1 truncate text-body-14 ${course.state === "planned" ? "text-ink-muted" : "text-ink-secondary"}`}
-                    >
-                      {course.title}
-                    </span>
+                    <span className="w-[92px] flex-none text-label-14 text-ink-primary">{course.code}</span>
+                    <span className="min-w-0 flex-1 truncate text-body-14 text-ink-secondary">{course.title}</span>
                   </>
                 );
                 return (
@@ -278,7 +275,7 @@ export function CoursePicker({
                     key={course.courseId}
                     className={`flex flex-col gap-2 rounded-[10px] ${failed ? "border-2 border-ink-primary bg-surface-sunken" : ""}`}
                   >
-                    {course.state === "eligible" ? (
+                    {course.prerequisitesMet ? (
                       <button
                         type="button"
                         disabled={busyId !== null}
@@ -308,22 +305,30 @@ export function CoursePicker({
                     ) : (
                       <div className="flex items-center gap-2 px-[10px] py-2">
                         {text}
-                        {course.state === "planned" ? (
-                          <span className={`${CHIP} bg-surface-sunken pl-[10px] text-ink-secondary`}>Already in plan</span>
-                        ) : (
-                          <span className={`${CHIP} bg-ink-primary text-surface-card`}>
-                            <Image src="/plan/conflict-lock.svg" alt="" width={16} height={16} />
-                            {course.needs ?? "Locked"}
-                          </span>
-                        )}
+                        <span className={`${CHIP} bg-ink-primary text-surface-card`}>
+                          <Image src="/plan/conflict-lock.svg" alt="" width={16} height={16} />
+                          {course.missing.length > 0 ? `Needs ${course.missing[0]}` : "Locked"}
+                          {course.missing.length > 1 ? ` +${course.missing.length - 1}` : ""}
+                        </span>
                       </div>
                     )}
                     {failed && (
                       <div role="alert" className="flex items-start gap-2 px-[10px] pb-2">
                         <Image src="/plan/error-small.svg" alt="" width={18} height={18} className="flex-none" />
-                        <p className="text-body-14 text-ink-primary">
-                          Can&rsquo;t add {course.code} to {termName}. {error.message} Nothing was added.
-                        </p>
+                        <div className="flex min-w-0 flex-col items-start gap-1">
+                          <p className="text-body-14 text-ink-primary">
+                            Can&rsquo;t add {course.code} to {termName}. {failed.message} Nothing was added.
+                          </p>
+                          {failed.suggestedTerm && (
+                            <TextButton
+                              className="text-caption-12 disabled:cursor-not-allowed disabled:opacity-60"
+                              disabled={busyId !== null}
+                              onClick={() => onAddTo(course, failed.suggestedTerm!)}
+                            >
+                              Add to {failed.suggestedTerm.name} instead
+                            </TextButton>
+                          )}
+                        </div>
                       </div>
                     )}
                   </li>
@@ -341,15 +346,27 @@ export function CoursePicker({
 
 const FLOAT = "absolute bottom-[104px] left-1/2 z-20 -translate-x-1/2";
 
-// Confirmation of a change that went through. No Undo: the API has no way to restore an item.
-export function Toast({ message }: { message: string }) {
+// Confirmation of a change that went through, with Undo when the API can take it back.
+export function Toast({ message, undo }: { message: string; undo?: { disabled: boolean; onClick: () => void } }) {
   return (
     <div
       role="status"
-      className={`${FLOAT} flex items-center gap-2 rounded-row bg-ink-primary px-[18px] py-3 text-label-14 whitespace-nowrap text-surface-card shadow-panel`}
+      className={`${FLOAT} flex items-center gap-4 rounded-row bg-ink-primary px-[18px] py-3 text-label-14 whitespace-nowrap text-surface-card shadow-panel`}
     >
-      <Image src="/plan/toast-check.svg" alt="" width={16} height={16} />
-      {message}
+      <span className="flex items-center gap-2">
+        <Image src="/plan/toast-check.svg" alt="" width={16} height={16} />
+        {message}
+      </span>
+      {undo && (
+        <button
+          type="button"
+          disabled={undo.disabled}
+          onClick={undo.onClick}
+          className="cursor-pointer text-label-14 text-brand-gold underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-gold disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          Undo
+        </button>
+      )}
     </div>
   );
 }
@@ -357,31 +374,36 @@ export function Toast({ message }: { message: string }) {
 const BANNER =
   "flex items-center gap-3 rounded-card border-[1.5px] border-ink-primary bg-surface-card px-4 py-3 text-body-14 text-ink-primary shadow-note-lifted";
 
-export function GeneratingBanner() {
+// The API reports no progress, so the banner does not count courses. Cancel aborts the request;
+// the server saves nothing for a cancelled request.
+export function GeneratingBanner({ onCancel }: { onCancel: () => void }) {
   return (
     <div role="status" className={`${FLOAT} ${BANNER} whitespace-nowrap`}>
       <Image src="/plan/spinner.svg" alt="" width={22} height={22} className="flex-none motion-safe:animate-spin" />
       Generating a draft plan. This can take up to a minute.
+      <TextButton onClick={onCancel}>Cancel</TextButton>
     </div>
   );
 }
 
-export function FailedBanner({
+export function NoticeBanner({
   message,
   onRetry,
   onDismiss,
 }: {
   message: string;
-  onRetry: () => void;
+  onRetry?: () => void;
   onDismiss: () => void;
 }) {
   return (
     <div role="alert" className={`${FLOAT} ${BANNER} w-[min(610px,calc(100%-48px))]`}>
       <Image src="/plan/warning.svg" alt="" width={22} height={22} className="flex-none" />
-      <p className="min-w-0 flex-1">Couldn&rsquo;t generate a draft plan. {message}</p>
-      <Button size="sm" full={false} onClick={onRetry}>
-        Try again
-      </Button>
+      <p className="min-w-0 flex-1">{message}</p>
+      {onRetry && (
+        <Button size="sm" full={false} onClick={onRetry}>
+          Try again
+        </Button>
+      )}
       <button
         type="button"
         onClick={onDismiss}
