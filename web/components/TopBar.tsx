@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { ThemeToggle } from "./ThemeToggle";
 
 // Logo + wordmark, as used in every top bar.
 export function Logo() {
@@ -10,7 +11,7 @@ export function Logo() {
   );
 }
 
-// 64px top bar. `tag` sits next to the logo, `children` are right-aligned.
+// 64px top bar. `tag` sits next to the logo, `children` and the theme toggle are right-aligned.
 // `surface` gives the bar its own card background and bottom border (signed-in screens).
 export function TopBar({
   surface = false,
@@ -31,7 +32,10 @@ export function TopBar({
         <Logo />
         {tag}
       </div>
-      {children && <div className="flex min-w-0 items-center gap-[14px]">{children}</div>}
+      <div className="flex min-w-0 items-center gap-[14px]">
+        {children}
+        <ThemeToggle />
+      </div>
     </header>
   );
 }
