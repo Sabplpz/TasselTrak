@@ -55,8 +55,8 @@ function PeopleIcon({
   size = 20,
   color = "#ffc900",
 }: {
-    size?: number;
-    color?: string;
+  size?: number;
+  color?: string;
 }) {
   return (
     <svg
@@ -110,15 +110,22 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   function selectRole(nextRole: Role) {
+    if (loading) return;
+
     setRole(nextRole);
     setError("");
+    setPassword("");
   }
 
   async function handleLogin(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+
+    if (loading) return;
+
     setError("");
     setLoading(true);
 
+    const selectedRole = role;
     let authenticated = false;
 
     try {
@@ -143,19 +150,23 @@ export default function LoginPage() {
 
       if (savedRole !== "student" && savedRole !== "advisor") {
         await signOut(auth);
+        setPassword("");
         setError(
-          "Your account doesn't have a valid role assigned. Contact the administrator."
+          "Your account does not have a valid role assigned. Please contact the administrator."
         );
         return;
       }
 
-      if (savedRole !== role) {
+      if (savedRole !== selectedRole) {
         await signOut(auth);
+        setPassword("");
+
         setError(
           savedRole === "student"
             ? 'Your account is a student account. Select "I’m a student".'
             : 'Your account is an advisor account. Select "I’m an advisor".'
         );
+
         return;
       }
 
@@ -165,12 +176,53 @@ export default function LoginPage() {
     } catch (err: unknown) {
       // No console.error here: Next.js dev mode opens its error overlay on it.
       if (authenticated) {
-        await signOut(auth).catch(() => {});
+        await signOut(auth).catch(console.error);
+        setPassword("");
         setError(
-          "Could not read your role. Check the UID and your Firebase Rules."
+          "We could not verify your account role. Please try again or contact the administrator."
         );
       } else {
-        setError(authMessage(err));
+        const code =
+          typeof err === "object" &&
+          err !== null &&
+          "code" in err
+            ? String(err.code)
+            : "";
+
+        switch (code) {
+          case "auth/invalid-email":
+            setError("Please enter a valid email address.");
+            break;
+
+          case "auth/invalid-credential":
+          case "auth/user-not-found":
+          case "auth/wrong-password":
+            setError(
+              "Incorrect email or password. Please try again."
+            );
+            break;
+
+          case "auth/user-disabled":
+            setError(
+              "Your account has been disabled. Please contact the administrator."
+            );
+            break;
+
+          case "auth/too-many-requests":
+            setError(
+              "Too many login attempts. Please try again later."
+            );
+            break;
+
+          case "auth/network-request-failed":
+            setError(
+              "Connection error. Please check your internet connection and try again."
+            );
+            break;
+
+          default:
+            setError("Unable to sign in. Please try again.");
+        }
       }
     } finally {
       setLoading(false);
@@ -348,13 +400,18 @@ export default function LoginPage() {
               <span className="tt-role-icon">
                 <CapIcon />
               </span>
+
               {role === "student" ? (
                 <span className="tt-pill">&#10003; Selected</span>
               ) : (
                 <span className="tt-radio" />
               )}
             </div>
-            <div className="tt-role-title">I&rsquo;m a student</div>
+
+            <div className="tt-role-title">
+              I&rsquo;m a student
+            </div>
+
             <div className="tt-role-sub">
               Plan your courses and see what&rsquo;s left.
             </div>
@@ -371,13 +428,18 @@ export default function LoginPage() {
               <span className="tt-role-icon">
                 <PeopleIcon />
               </span>
+
               {role === "advisor" ? (
                 <span className="tt-pill">&#10003; Selected</span>
               ) : (
                 <span className="tt-radio" />
               )}
             </div>
-            <div className="tt-role-title">I&rsquo;m an advisor</div>
+
+            <div className="tt-role-title">
+              I&rsquo;m an advisor
+            </div>
+
             <div className="tt-role-sub">
               See your students and who needs attention.
             </div>
@@ -387,11 +449,13 @@ export default function LoginPage() {
         <div className="tt-panel">
           <div className="tt-panel-head">
             <h2>
-              {role === "advisor" ? "Advisor Login" : "Student Login"}
+              {role === "advisor"
+                ? "Advisor Login"
+                : "Student Login"}
             </h2>
           </div>
 
-          <form onSubmit={handleLogin} className="tt-form">
+          <form onSubmit={handleLogin} className="tt-form" noValidate>
             <input
               className="tt-input"
               type="email"
