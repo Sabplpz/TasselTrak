@@ -321,9 +321,9 @@ export default function LoginPage() {
         setPassword("");
 
         setError(
-          savedRole === "advisor"
-            ? 'Advisor accounts are not permitted in the student login. Please select "I’m an advisor".'
-            : 'Student accounts are not permitted in the advisor login. Please select "I’m a student".'
+          savedRole === "student"
+            ? 'Your account is a student account. Select "I’m a student".'
+            : 'Your account is an advisor account. Select "I’m an advisor".'
         );
 
         return;
@@ -333,8 +333,7 @@ export default function LoginPage() {
         savedRole === "advisor" ? "/advisor" : "/dashboard"
       );
     } catch (err: unknown) {
-      console.error(err);
-
+      // No console.error here: Next.js dev mode opens its error overlay on it.
       if (authenticated) {
         await signOut(auth).catch(console.error);
         setPassword("");
@@ -344,8 +343,8 @@ export default function LoginPage() {
       } else {
         const code =
           typeof err === "object" &&
-          err !== null &&
-          "code" in err
+            err !== null &&
+            "code" in err
             ? String(err.code)
             : "";
 
