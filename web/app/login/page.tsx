@@ -2,12 +2,30 @@
 
 import { useState, type FormEvent } from "react";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { FirebaseError } from "firebase/app";
 import { getDatabase, ref, get } from "firebase/database";
 import { auth } from "../../lib/firebase";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 
 type Role = "student" | "advisor";
+
+function authMessage(err: unknown) {
+  if (err instanceof FirebaseError) {
+    switch (err.code) {
+      case "auth/invalid-credential":
+      case "auth/wrong-password":
+      case "auth/user-not-found":
+      case "auth/invalid-email":
+        return "Incorrect email or password.";
+      case "auth/too-many-requests":
+        return "Too many attempts. Try again later.";
+      case "auth/network-request-failed":
+        return "Network error. Check your connection.";
+    }
+  }
+  return "Could not sign in. Please check your email and password.";
+}
 
 function CapIcon({
   size = 20,
@@ -145,9 +163,9 @@ export default function LoginPage() {
         setPassword("");
 
         setError(
-          savedRole === "advisor"
-            ? 'Advisor accounts are not permitted in the student login. Please select "I’m an advisor".'
-            : 'Student accounts are not permitted in the advisor login. Please select "I’m a student".'
+          savedRole === "student"
+            ? 'Your account is a student account. Select "I’m a student".'
+            : 'Your account is an advisor account. Select "I’m an advisor".'
         );
 
         return;
@@ -157,8 +175,7 @@ export default function LoginPage() {
         savedRole === "advisor" ? "/advisor" : "/dashboard"
       );
     } catch (err: unknown) {
-      console.error(err);
-
+      // No console.error here: Next.js dev mode opens its error overlay on it.
       if (authenticated) {
         await signOut(auth).catch(console.error);
         setPassword("");
@@ -232,10 +249,6 @@ export default function LoginPage() {
           />
           <span>TasselTrak</span>
         </div>
-
-        <a href="#how" className="tt-nav-link">
-          How it works
-        </a>
       </header>
 
       <svg
@@ -446,7 +459,6 @@ export default function LoginPage() {
                 ? "Advisor Login"
                 : "Student Login"}
             </h2>
-            <span>UCF email</span>
           </div>
 
           <form onSubmit={handleLogin} className="tt-form" noValidate>
