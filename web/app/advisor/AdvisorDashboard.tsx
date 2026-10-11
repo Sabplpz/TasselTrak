@@ -7,7 +7,9 @@ import { Button, ButtonLink, TextButton } from "@/components/Button";
 import { Avatar, Pill, RiskChip, Tag, type RiskLevel } from "@/components/Chip";
 import { Select } from "@/components/Select";
 import { Skeleton, StateMessage } from "@/components/State";
+import { useRouter } from "next/navigation";
 import { getJson, reasonOf } from "@/lib/fetchJson";
+import { explain, generatePlan } from "@/lib/planApi";
 import type { Advisor } from "@/lib/useAdvisorSession";
 
 // Row from GET /api/caseload
@@ -134,11 +136,17 @@ const PANEL =
 function StudentPanel({
   row,
   detail,
+  generating,
+  generateError,
+  onGenerate,
   onRetry,
   onClose,
 }: {
   row: CaseloadStudent;
   detail: Detail | null;
+  generating: boolean; // a first draft plan is being generated for this student
+  generateError: string | null;
+  onGenerate: () => void;
   onRetry: () => void;
   onClose: () => void;
 }) {
@@ -311,11 +319,19 @@ function StudentPanel({
                 </ButtonLink>
                 <p className="flex items-center gap-1.5 text-caption-12-regular text-ink-secondary">
                   <Image src="/advisor/eye.svg" alt="" width={16} height={16} />
-                  Opens {firstName}&rsquo;s canvas in read-only mode
+                  Opens {firstName}&rsquo;s plan board
                 </p>
               </>
             ) : (
-              <Button disabled>No plan yet</Button>
+              <>
+                <Button disabled={generating} onClick={onGenerate}>
+                  {generating ? "Generating a draft plan…" : "Generate draft plan"}
+                </Button>
+                <p role={generateError ? "alert" : undefined} className="text-center text-caption-12-regular text-ink-secondary">
+                  {generateError ??
+                    (generating ? "This can take up to a minute." : `${firstName} doesn’t have a plan yet.`)}
+                </p>
+              </>
             )}
           </div>
         </>
@@ -335,6 +351,8 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const requestedId = useRef<number | null>(null);
+  const router = useRouter();
+  const [generation, setGeneration] = useState<{ id: number; error?: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -377,6 +395,17 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
       if (requestedId.current === id) setDetail({ id, data });
     } catch (e) {
       if (requestedId.current === id) setDetail({ id, error: reasonOf(e) });
+    }
+  }
+
+  // First draft for a student with no plan: one request of up to about a minute, then their board.
+  async function generateFor(id: number) {
+    setGeneration({ id });
+    try {
+      const created = await generatePlan(id, advisor.id, false, new AbortController().signal);
+      router.push(`/plans/${created.plan.id}${window.location.search}`);
+    } catch (e) {
+      setGeneration({ id, error: `Couldn’t generate a draft plan. ${explain(e)}` });
     }
   }
 
@@ -627,6 +656,9 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
           <StudentPanel
             row={selected}
             detail={detail}
+            generating={generation?.id === selected.student_id && !generation.error}
+            generateError={generation?.id === selected.student_id ? (generation.error ?? null) : null}
+            onGenerate={() => generateFor(selected.student_id)}
             onRetry={() => openStudent(selected.student_id)}
             onClose={() => setSelectedId(null)}
           />

@@ -136,6 +136,7 @@ const MESSAGES: Record<string, string> = {
   program_not_found: "That major could not be found.",
   term_not_found: "That term isn’t available for planning.",
   no_plan: "This student doesn’t have a plan yet.",
+  no_program: "Pick a major first.",
   // the plan can't be edited right now
   read_only: "This plan is approved and read-only. Reopen it to make changes.",
   archived: "This plan was replaced by a newer draft. Open the student’s current plan to make changes.",
