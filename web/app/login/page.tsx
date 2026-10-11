@@ -240,7 +240,7 @@ export default function LoginPage() {
       <header className="tt-nav">
         <div className="tt-brand">
           <Image
-            src="/logo.png"
+            src="/logo-white.png"
             alt="TasselTrak logo"
             width={40}
             height={40}
