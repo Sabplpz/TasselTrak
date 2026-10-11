@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { StudentGate, type StudentAccount } from "@/components/StudentGate";
 import { TopBar } from "@/components/TopBar";
 import { Button, ButtonLink, TextButton } from "@/components/Button";
@@ -113,6 +114,7 @@ function CourseRow({
 
 function CoursePicker({ account, onSignOut }: { account: StudentAccount; onSignOut: () => void }) {
   const { student, name } = account;
+  const router = useRouter();
   const [setup, setSetup] = useState<Setup>({ status: "loading" });
   const [setupAttempt, setSetupAttempt] = useState(0);
   const [programId, setProgramId] = useState<number | null>(student.programId);
@@ -232,6 +234,7 @@ function CoursePicker({ account, onSignOut }: { account: StudentAccount; onSignO
     try {
       const result = await saveHistory(student.id, programId, toEntries(marks, setup.history));
       setSaved({ status: "saved", courses: result.saved });
+      router.push(`/board${window.location.search}`);
     } catch (e) {
       setSaved({ status: "error", reason: explain(e) });
     }
@@ -383,9 +386,8 @@ function CoursePicker({ account, onSignOut }: { account: StudentAccount; onSignO
               We couldn&rsquo;t save your courses. {saved.reason}
             </p>
           ) : saved.status === "saved" ? (
-            // The board screen comes in the next pass; until then the save is confirmed here.
             <p role="status" className="text-caption-12 text-ink-primary">
-              Saved. {plural(saved.courses, "course")} on file.
+              Saved. {plural(saved.courses, "course")} on file. Opening your board…
             </p>
           ) : (
             <p className="text-caption-12-regular text-ink-secondary">

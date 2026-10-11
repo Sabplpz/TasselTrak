@@ -43,6 +43,51 @@ export type HistoryCourse = {
 // Row of the PUT body. A taken course with no grade is saved as "P".
 export type HistoryEntry = { courseId: number; status?: "taken" | "in_progress"; grade?: string | null; termCode?: string | null };
 
+// One note on the student's board.
+export type BoardCourse = {
+  courseId: number;
+  code: string;
+  title: string;
+  credits: number;
+  status: "taken" | "in_progress" | "planned" | "available" | "locked";
+  needs: string[]; // what a locked course is waiting on
+  termCode: string | null; // null: no semester (the unplaced pool, or taken with no term on file)
+  grade: string | null;
+};
+
+export type BoardTerm = { code: string; name: string; state: "completed" | "current" | "planned"; label: string; credits: number };
+
+// GET /api/students/:id/board, also returned by every board change.
+export type StudentBoard = {
+  header: {
+    gpa: number | null;
+    creditsCompleted: number;
+    creditsInProgress: number;
+    creditsPlanned: number;
+    creditsTotal: number;
+    projectedGraduation: { code: string; name: string } | null;
+  };
+  plan: { id: number; status: "draft" | "in_review" | "approved" | "archived" } | null;
+  editable: boolean; // false once the advisor approved the plan
+  terms: BoardTerm[];
+  courses: BoardCourse[];
+};
+
+// GET /api/students/:id/board -> the whole canvas. 409 no_program until a major is saved.
+export const getBoard = (studentId: number) => request<StudentBoard>("GET", `/api/students/${studentId}/board`);
+
+// POST /api/students/:id/board/courses { courseId, termCode } -> plan a course. 422 check_failed.
+export const boardAdd = (studentId: number, courseId: number, termCode: string) =>
+  request<unknown>("POST", `/api/students/${studentId}/board/courses`, { courseId, termCode });
+
+// PATCH /api/students/:id/board/courses/:courseId { termCode } -> move it. 422 check_failed.
+export const boardMove = (studentId: number, courseId: number, termCode: string) =>
+  request<unknown>("PATCH", `/api/students/${studentId}/board/courses/${courseId}`, { termCode });
+
+// DELETE /api/students/:id/board/courses/:courseId -> take it off the plan.
+export const boardRemove = (studentId: number, courseId: number) =>
+  request<unknown>("DELETE", `/api/students/${studentId}/board/courses/${courseId}`);
+
 // POST /api/students/login { studentId } or { email } -> the student row, and "upload" when
 // nothing is on file yet or "board" otherwise. 404 student_not_found.
 export const loginStudent = (by: { studentId: number } | { email: string }) =>
