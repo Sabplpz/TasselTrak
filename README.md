@@ -1,6 +1,18 @@
-#  TasselTrak 🎓
+<p align="center">
+  <a href="https://tasseltrak.study">
+    <img src="web/public/logo.png" alt="TasselTrak logo" width="160" />
+  </a>
+</p>
 
-**Plan your courses. Visualize your path. Graduate smarter.**
+<h1 align="center">TasselTrak 🎓</h1>
+
+<p align="center">
+  <strong>Plan your courses. Visualize your path. Graduate smarter.</strong>
+</p>
+
+<p align="center">
+  🌐 <strong>Live at <a href="https://tasseltrak.study">tasseltrak.study</a></strong>
+</p>
 
 ## 📖 Overview
 
@@ -73,6 +85,8 @@ Students and advisors work on the same plan, so there is one version of the trut
 6. **Risk scores.** A Databricks job scores every student from seven academic signals and stores each factor's contribution, which the advisor panel displays.
 
 ## 🚀 Getting Started
+
+The app is deployed at [tasseltrak.study](https://tasseltrak.study). To run it locally:
 
 ### Prerequisites
 
@@ -177,14 +191,6 @@ TasselTrak/
     ├── tests/            Route tests
     └── API.md            API reference
 ```
-
-## ⚠️ Known Limitations
-
-- All students, sections, grades and instructors are synthetic.
-- The API routes do not verify the caller on the server. This is a demo, not a production deployment.
-- Degree-audit PDF upload is not built yet. Students enter their history with the course picker.
-- The risk score is a transparent weighted formula, not a trained model, so no accuracy is claimed.
-- The student board uses buttons to plan courses. Drag and drop is on the advisor canvas only.
 
 ## 🔮 Future Improvements
 
