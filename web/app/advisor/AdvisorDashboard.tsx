@@ -31,6 +31,7 @@ type RiskFactor = { raw?: Record<string, unknown>; contribution?: number };
 // Parts of GET /api/students/:id that the panel shows
 type StudentDetail = {
   student: { expected_graduation: string | null; is_synthetic: boolean };
+  flags: { id: number; message: string }[];
   risk: { risk_score: number; risk_level: RiskLevel; factors: Record<string, RiskFactor> | null } | null;
 };
 
@@ -208,7 +209,14 @@ function StudentPanel({
                 ) : (
                   <p className="text-label-14 text-ink-primary">No risk score has been computed for this student yet.</p>
                 )}
-                <p className="text-body-14 text-ink-primary">
+                {data.flags.length > 0 && (
+                  <ul className="flex flex-col gap-1.5 text-body-14 text-ink-primary">
+                    {data.flags.map((flag) => (
+                      <li key={flag.id}>{flag.message}</li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-caption-12-regular text-ink-secondary">
                   Advisory only. The score informs a conversation and never restricts enrollment or blocks a plan.
                 </p>
               </div>
@@ -343,7 +351,7 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
 
   const selected = students.find((s) => s.student_id === selectedId) ?? null;
   const open = selected !== null;
-  const highRisk = students.filter((s) => s.risk_level === "high").length;
+  const highRisk = visible.filter((s) => s.risk_level === "high").length;
   const gap = open ? "gap-[14px]" : "gap-4";
 
   return (
@@ -366,7 +374,11 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
             <h1 className="text-heading-28 whitespace-nowrap text-ink-primary">Your students</h1>
             <p className="text-body-14 text-ink-secondary">
               {caseload.status === "ready"
-                ? `${plural(caseload.total, "student")} · ${highRisk} high risk${
+                ? `${
+                    visible.length === caseload.total
+                      ? plural(caseload.total, "student")
+                      : `${visible.length} of ${plural(caseload.total, "student")}`
+                  } · ${highRisk} high risk${
                     open ? "" : " · click a row to open that student’s board"
                   }`
                 : caseload.status === "loading"
@@ -462,8 +474,16 @@ export function AdvisorDashboard({ advisor, onSignOut }: { advisor: Advisor; onS
                     >
                       <span className="flex min-w-0 flex-1 items-center gap-[10px]">
                         <Avatar name={s.display_name} />
-                        <span className="truncate text-label-14 text-ink-primary">{s.display_name}</span>
-                        {isSelected && <Pill>Viewing</Pill>}
+                        {isSelected ? (
+                          // One line high and wrapping: the name is never cut short, and the tag
+                          // drops to a hidden second line when the two do not fit side by side.
+                          <span className="flex h-5 min-w-0 flex-1 flex-wrap items-center gap-x-[10px] overflow-hidden">
+                            <span className="text-label-14 whitespace-nowrap text-ink-primary">{s.display_name}</span>
+                            <Pill>Viewing</Pill>
+                          </span>
+                        ) : (
+                          <span className="truncate text-label-14 text-ink-primary">{s.display_name}</span>
+                        )}
                       </span>
                       <span className="w-[200px] truncate text-body-14 text-ink-secondary max-md:hidden">
                         {s.program_name}
