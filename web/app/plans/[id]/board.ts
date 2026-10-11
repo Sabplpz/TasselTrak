@@ -1,79 +1,20 @@
 import type { CourseState } from "@/components/CourseNode";
+import type { CourseOptions, PlanIssue, PlanItem, PlanResponse, Prerequisite, StudentExtras, TermRef } from "@/lib/planApi";
 
-// ---- API shapes (only the fields the board reads)
+// ---- Icons shared by the canvas and the side panel
 
-export type PlanIssue = { type: string; severity: "high" | "medium" | "low"; message: string };
-
-export type PlanItem = {
-  id: number;
-  courseId: number;
-  code: string;
-  title: string;
-  credits: number;
-  reason: string | null;
-  source: "ai" | "advisor";
-  section: {
-    section_code: string | null;
-    modality: string | null;
-    days: string[] | null;
-    start_time: string | null;
-    end_time: string | null;
-    capacity: number | null;
-    seats_open: number | null;
-    instructor: string | null;
-  } | null;
-  issues: PlanIssue[];
+export const STATE_ICON: Record<CourseState, string> = {
+  taken: "/login/icon-taken.svg",
+  "in-progress": "/login/icon-in-progress.svg",
+  available: "/login/icon-available.svg",
+  locked: "/login/icon-locked.svg",
+  suggested: "/plan/suggested.svg",
 };
 
-// GET /api/plans/:id
-export type PlanResponse = {
-  plan: {
-    id: number;
-    studentId: number;
-    studentName: string;
-    programName: string | null;
-    status: "draft" | "in_review" | "approved" | "archived";
-    createdBy: "ai" | "advisor";
-    modelName: string | null;
-    rationale: string | null;
-  };
-  term: { code: string; name: string };
-  items: PlanItem[];
-  totals: { credits: number; target: number; courses: number };
-  issues: PlanIssue[];
-};
-
-// GET /api/students/:id
-export type StudentResponse = {
-  student: { expected_graduation: string | null };
-  completed: {
-    code: string;
-    title: string;
-    credits: number;
-    grade: string | null;
-    term: string | null;
-    in_progress: boolean;
-  }[];
-  remaining: {
-    course_id: number;
-    code: string;
-    title: string;
-    credits: number;
-    category: string | null;
-    group_label: string | null;
-    critical_path: boolean;
-    depth: number;
-    eligible: boolean;
-  }[];
-};
-
-// GET /api/plans/:id/prerequisites
-export type Prerequisite = {
-  courseCode: string;
-  requiredCode: string;
-  kind: "prereq" | "coreq";
-  groupNo: number;
-  minGrade: string | null;
+export const BADGE_ICON = {
+  lock: "/plan/conflict-lock.svg",
+  clock: "/plan/conflict-clock.svg",
+  warning: "/advisor/risk-high.svg",
 };
 
 // ---- Board model
@@ -92,6 +33,7 @@ const FIRST_ROW_Y = HEADER_H + ROW_GAP;
 
 export type BoardCourse = {
   id: string;
+  courseId: number;
   code: string;
   title: string;
   credits: number;
@@ -100,10 +42,17 @@ export type BoardCourse = {
   blocked?: boolean;
   grade?: string | null;
   where: "term" | "plan" | "unplanned";
+  // What dragging this note means. "plan": it is in the plan and can move to another plan term or
+  // leave the plan. "unplanned": it can be added to a plan term. null: not draggable.
+  drag: "plan" | "unplanned" | null;
+  termCode: string | null;
   termLabel: string;
   criticalPath: boolean;
   fills: string | null;
   item?: PlanItem;
+  // For a course that is not planned yet: whether each plan term would take it, and if not, what
+  // it is waiting on. A term that is missing here is one the API gave no answer for.
+  fit: Record<string, { met: boolean; missing: string[] }>;
   badge?: { kind: "lock" | "clock" | "warning"; text: string };
   column: number;
   x: number;
@@ -116,9 +65,10 @@ export type BoardColumn = {
   sub: string;
   now: boolean;
   where: BoardCourse["where"];
+  termCode: string | null;
   x: number;
   width: number;
-  addY?: number; // where the disabled "Add course" placeholder sits
+  addY?: number; // where the "Add course" button sits (plan terms only)
   groups?: BoardGroup[]; // subheadings inside "Not yet planned"
 };
 
@@ -129,18 +79,12 @@ export type BoardEdge = { id: string; source: string; target: string };
 // `bottom` is the lowest point any column reaches, so the term bands can all run the full height.
 export type Board = { columns: BoardColumn[]; courses: BoardCourse[]; edges: BoardEdge[]; bottom: number };
 
-const SEASONS: Record<string, number> = { spring: 1, summer: 2, fall: 3 };
-
-// "Fall 2026" -> 20263, so terms sort in calendar order. Names that don't parse go last.
-function termOrder(name: string) {
-  const m = /^(\w+)\s+(\d{4})$/.exec(name.trim());
-  const season = m ? SEASONS[m[1].toLowerCase()] : undefined;
-  return m && season ? Number(m[2]) * 10 + season : Number.MAX_SAFE_INTEGER;
-}
-
 const humanize = (s: string) => s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 const cr = (n: number) => `${n} cr`;
 const sum = (rows: { credits: number }[]) => rows.reduce((total, r) => total + r.credits, 0);
+
+// ["COP 3503C", "MAC 2312"] -> "Needs COP 3503C +1"
+const needsLabel = (needs: string[]) => (needs.length ? `Needs ${needs[0]}${needs.length > 1 ? ` +${needs.length - 1}` : ""}` : undefined);
 
 // "COP 3503C needs COP 3502C first." -> "Needs COP 3502C first"
 function needsText(issue: PlanIssue, code: string) {
@@ -156,134 +100,187 @@ function badgeFor(item: PlanItem): BoardCourse["badge"] {
   return { kind: "warning", text: humanize(issue.type) };
 }
 
-export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequisites: Prerequisite[]): Board {
+// The term after `term` on the calendar, skipping summer, the way the planner counts terms:
+// "spring-2027" -> fall-2027, "fall-2027" -> spring-2028. null if the code has another shape.
+export function termAfter(term: TermRef): TermRef | null {
+  const m = /^(spring|summer|fall)-(\d{4})$/.exec(term.code);
+  if (!m) return null;
+  const [season, year] = m[1] === "fall" ? ["spring", Number(m[2]) + 1] : ["fall", Number(m[2])];
+  return { code: `${season}-${year}`, name: `${humanize(season)} ${year}` };
+}
+
+// The plan terms the board shows: every planned term in the plan object (or its first term when
+// it has no courses yet), plus `later`, an empty term to move courses into.
+export function planTerms(plan: PlanResponse, later: TermRef | null): TermRef[] {
+  const planned = plan.terms.filter((t) => t.state === "planned").map((t) => ({ code: t.code, name: t.name }));
+  const terms = planned.length > 0 ? planned : [plan.term];
+  return later && !terms.some((t) => t.code === later.code) ? [...terms, later] : terms;
+}
+
+// `options` is the course-options answer for each plan term, keyed by term code. `later` is the
+// empty plan term after the last one (see planTerms); pass null to leave it out.
+export function buildBoard(
+  plan: PlanResponse,
+  options: Record<string, CourseOptions>,
+  prerequisites: Prerequisite[],
+  extras: StudentExtras | null,
+  later: TermRef | null,
+): Board {
   const columns: BoardColumn[] = [];
   const courses: BoardCourse[] = [];
-  const remainingById = new Map(student.remaining.map((r) => [r.course_id, r]));
-  const fillsOf = (r?: StudentResponse["remaining"][number]) =>
-    r ? humanize(r.group_label ?? r.category ?? "") || null : null;
-
+  const editable = !plan.readOnly;
   const place = (column: number, row: number) => ({ column, x: column * COL_PITCH, y: FIRST_ROW_Y + row * ROW_PITCH });
 
-  // 1. Past and current terms, from the student's transcript.
-  const byTerm = new Map<string, StudentResponse["completed"]>();
-  for (const c of student.completed) {
-    const term = c.term ?? "Unknown term";
-    byTerm.set(term, [...(byTerm.get(term) ?? []), c]);
-  }
-  const termNames = [...byTerm.keys()].filter((t) => t !== plan.term.name).sort((a, b) => termOrder(a) - termOrder(b));
-  const nowTerm = [...termNames].reverse().find((t) => byTerm.get(t)!.some((c) => c.in_progress));
-
-  for (const term of termNames) {
-    const rows = byTerm.get(term)!;
+  // 1. Past and current terms, from the plan's history.
+  for (const term of plan.terms.filter((t) => t.state !== "planned")) {
+    const rows = plan.history.filter((h) => h.termCode === term.code);
     const column = columns.length;
-    const now = term === nowTerm;
     columns.push({
-      id: `term:${term}`,
-      title: term,
-      sub: `${now ? "In progress" : "Completed"} · ${cr(sum(rows))}`,
-      now,
+      id: `term:${term.code}`,
+      title: term.name,
+      sub: `${term.label} · ${cr(term.credits)}`,
+      now: term.now,
       where: "term",
+      termCode: term.code,
       x: column * COL_PITCH,
       width: NODE_W,
     });
-    rows.forEach((c, row) =>
+    rows.forEach((h, row) =>
       courses.push({
-        id: `${term}:${c.code}`,
-        code: c.code,
-        title: c.title,
-        credits: c.credits,
-        state: c.in_progress ? "in-progress" : "taken",
-        grade: c.grade,
+        id: `${term.code}:${h.code}`,
+        courseId: h.courseId,
+        code: h.code,
+        title: h.title,
+        credits: h.credits,
+        state: h.status === "in_progress" ? "in-progress" : "taken",
+        // "TC" is the transcript's grade for transfer credit, which is filed under the first term
+        // without having been taken in it.
+        status: h.status === "not_passed" ? "Not passed" : h.grade === "TC" ? "Transfer credit" : undefined,
+        grade: h.grade,
         where: "term",
-        termLabel: term,
+        drag: null,
+        termCode: term.code,
+        termLabel: term.name,
         criticalPath: false,
         fills: null,
+        fit: {},
         ...place(column, row),
       }),
     );
   }
 
-  // 2. The plan's term.
-  const planColumn = columns.length;
-  columns.push({
-    id: `plan:${plan.term.name}`,
-    title: plan.term.name,
-    sub: `Up next · ${cr(plan.totals.credits)}`,
-    now: false,
-    where: "plan",
-    x: planColumn * COL_PITCH,
-    width: NODE_W,
-    addY: FIRST_ROW_Y + plan.items.length * ROW_PITCH,
-  });
-  plan.items.forEach((item, row) => {
-    const notEligible = item.issues.find((i) => i.type === "not_eligible");
-    const required = remainingById.get(item.courseId);
-    const suggested = item.source === "ai";
-    courses.push({
-      id: `plan:${item.code}`,
-      code: item.code,
-      title: item.title,
-      credits: item.credits,
-      state: suggested ? "suggested" : notEligible ? "locked" : "available",
-      status: notEligible ? needsText(notEligible, item.code).replace(/ first$/, "") : undefined,
-      blocked: !!notEligible,
-      where: "plan",
-      termLabel: plan.term.name,
-      criticalPath: required?.critical_path ?? false,
-      fills: fillsOf(required),
-      item,
-      badge: badgeFor(item),
-      ...place(planColumn, row),
-    });
-  });
-
-  // 3. Everything still required and not in the plan, by depth, wrapped into columns no taller
-  //    than the tallest term so the board stays a rectangle.
-  //    It is its own region, set apart from the terms by a gap, with the courses that can be
-  //    taken now grouped ahead of the locked ones.
-  const planned = new Set(plan.items.map((i) => i.courseId));
-  const unplanned = student.remaining
-    .filter((r) => !planned.has(r.course_id))
-    .sort((a, b) => a.depth - b.depth || Number(b.critical_path) - Number(a.critical_path) || a.code.localeCompare(b.code));
-  if (unplanned.length > 0) {
-    const rowsPerColumn = Math.max(6, plan.items.length + 1, ...[...byTerm.values()].map((rows) => rows.length));
-    const regionX = columns.length * COL_PITCH + REGION_GAP;
-    const groups: BoardGroup[] = [];
-    let nextColumn = 0;
-    for (const [label, state] of [["Available now", "available"], ["Locked", "locked"]] as const) {
-      const rows = unplanned.filter((r) => r.eligible === (state === "available"));
-      if (rows.length === 0) continue;
-      groups.push({ label, state, count: rows.length, x: regionX + nextColumn * COL_PITCH });
-      rows.forEach((r, i) => {
-        const column = nextColumn + Math.floor(i / rowsPerColumn);
-        courses.push({
-          id: `unplanned:${r.code}`,
-          code: r.code,
-          title: r.title,
-          credits: r.credits,
-          state,
-          where: "unplanned",
-          termLabel: "Not yet planned",
-          criticalPath: r.critical_path,
-          fills: fillsOf(r),
-          column: columns.length + column,
-          x: regionX + column * COL_PITCH,
-          y: FIRST_ROW_Y + (i % rowsPerColumn) * ROW_PITCH,
-        });
-      });
-      nextColumn += Math.ceil(rows.length / rowsPerColumn);
-    }
+  // 2. One column per plan term.
+  const terms = planTerms(plan, later);
+  for (const term of terms) {
+    const info = plan.terms.find((t) => t.code === term.code);
+    const items = plan.items.filter((i) => i.termCode === term.code);
+    const column = columns.length;
     columns.push({
-      id: "unplanned",
-      title: "Not yet planned",
-      sub: `${unplanned.length} ${unplanned.length === 1 ? "course" : "courses"} · ${cr(sum(unplanned))}`,
+      id: `plan:${term.code}`,
+      title: term.name,
+      sub: `${info?.label ?? "Later"} · ${cr(sum(items))}`,
       now: false,
-      where: "unplanned",
-      x: regionX,
-      width: (nextColumn - 1) * COL_PITCH + NODE_W,
-      groups,
+      where: "plan",
+      termCode: term.code,
+      x: column * COL_PITCH,
+      width: NODE_W,
+      addY: FIRST_ROW_Y + items.length * ROW_PITCH,
     });
+    items.forEach((item, row) => {
+      const waiting = item.status !== "available";
+      courses.push({
+        id: `plan:${item.code}`,
+        courseId: item.courseId,
+        code: item.code,
+        title: item.title,
+        credits: item.credits,
+        state: item.suggested ? "suggested" : waiting ? "locked" : "available",
+        status: waiting ? (needsLabel(item.needs) ?? "Locked") : undefined,
+        blocked: waiting,
+        where: "plan",
+        drag: editable ? "plan" : null,
+        termCode: term.code,
+        termLabel: term.name,
+        criticalPath: extras?.critical.has(item.courseId) ?? false,
+        fills: item.fills ? humanize(item.fills) : null,
+        item,
+        fit: {},
+        badge: badgeFor(item),
+        ...place(column, row),
+      });
+    });
+  }
+
+  // 3. Everything that can still be added, from the picker's own list. It is its own region, set
+  //    apart from the terms by a gap. "Available now" and "Locked" are judged for the first plan
+  //    term; `fit` keeps the answer for every plan term, for dragging.
+  const first = options[terms[0].code];
+  if (first) {
+    const fit = new Map<number, BoardCourse["fit"]>();
+    for (const term of terms) {
+      for (const group of options[term.code]?.groups ?? []) {
+        for (const c of group.courses) {
+          fit.set(c.courseId, { ...fit.get(c.courseId), [term.code]: { met: c.prerequisitesMet, missing: c.missing } });
+        }
+      }
+    }
+    const unplanned = first.groups
+      .flatMap((group) => group.courses.map((c) => ({ ...c, fills: humanize(group.fills ?? group.requirement) })))
+      .sort(
+        (a, b) =>
+          (extras?.depth.get(a.courseId) ?? 99) - (extras?.depth.get(b.courseId) ?? 99) ||
+          Number(b.criticalPath) - Number(a.criticalPath) ||
+          a.code.localeCompare(b.code),
+      );
+    if (unplanned.length > 0) {
+      const tallest = Math.max(
+        ...plan.terms.map((t) => (t.state === "planned" ? plan.items : plan.history).filter((c) => c.termCode === t.code).length),
+        0,
+      );
+      const rowsPerColumn = Math.max(6, tallest + 1);
+      const regionX = columns.length * COL_PITCH + REGION_GAP;
+      const groups: BoardGroup[] = [];
+      let nextColumn = 0;
+      for (const [label, state] of [["Available now", "available"], ["Locked", "locked"]] as const) {
+        const rows = unplanned.filter((c) => c.prerequisitesMet === (state === "available"));
+        if (rows.length === 0) continue;
+        groups.push({ label, state, count: rows.length, x: regionX + nextColumn * COL_PITCH });
+        rows.forEach((c, i) => {
+          const column = nextColumn + Math.floor(i / rowsPerColumn);
+          courses.push({
+            id: `unplanned:${c.code}`,
+            courseId: c.courseId,
+            code: c.code,
+            title: c.title,
+            credits: c.credits,
+            state,
+            status: state === "locked" ? (needsLabel(c.missing) ?? "Locked") : undefined,
+            where: "unplanned",
+            drag: editable ? "unplanned" : null,
+            termCode: null,
+            termLabel: "Not yet planned",
+            criticalPath: c.criticalPath,
+            fills: c.fills,
+            fit: fit.get(c.courseId) ?? {},
+            column: columns.length + column,
+            x: regionX + column * COL_PITCH,
+            y: FIRST_ROW_Y + (i % rowsPerColumn) * ROW_PITCH,
+          });
+        });
+        nextColumn += Math.ceil(rows.length / rowsPerColumn);
+      }
+      columns.push({
+        id: "unplanned",
+        title: "Not yet planned",
+        sub: `${unplanned.length} ${unplanned.length === 1 ? "course" : "courses"} · ${cr(sum(unplanned))}`,
+        now: false,
+        where: "unplanned",
+        termCode: null,
+        x: regionX,
+        width: (nextColumn - 1) * COL_PITCH + NODE_W,
+        groups,
+      });
+    }
   }
 
   // 4. Connectors: one per prerequisite pair that has both ends on the board. A course can be on
@@ -309,6 +306,9 @@ export function buildBoard(plan: PlanResponse, student: StudentResponse, prerequ
   );
   return { columns, courses, edges: [...edges.values()], bottom };
 }
+
+// Course codes inside "what it needs" strings such as "COP 3502C" or "one of MAC 2311C / MAC 2281".
+export const codesIn = (needs: string[]) => needs.flatMap((n) => n.match(/[A-Z]{2,4} [A-Z0-9]{3,5}/g) ?? []);
 
 // Prerequisite groups of one course: every group is needed, any one course in a group satisfies it.
 export function prerequisiteGroups(code: string, prerequisites: Prerequisite[]) {
