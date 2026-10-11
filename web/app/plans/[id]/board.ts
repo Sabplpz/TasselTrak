@@ -153,7 +153,9 @@ export function buildBoard(
         title: h.title,
         credits: h.credits,
         state: h.status === "in_progress" ? "in-progress" : "taken",
-        status: h.status === "not_passed" ? "Not passed" : undefined,
+        // "TC" is the transcript's grade for transfer credit, which is filed under the first term
+        // without having been taken in it.
+        status: h.status === "not_passed" ? "Not passed" : h.grade === "TC" ? "Transfer credit" : undefined,
         grade: h.grade,
         where: "term",
         drag: null,
