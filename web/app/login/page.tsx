@@ -271,7 +271,7 @@ export default function LoginPage() {
       }
 
       router.replace(
-        savedRole === "advisor" ? "/advisor" : "/dashboard"
+        savedRole === "advisor" ? "/advisor" : "/upload"
       );
     } catch (err: unknown) {
       // No console.error here: Next.js dev mode opens its error overlay on it.
