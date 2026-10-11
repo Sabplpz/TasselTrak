@@ -9,6 +9,8 @@ import { Avatar, Pill, PlanStatusChip } from "@/components/Chip";
 import { Skeleton, StateMessage } from "@/components/State";
 import {
   addCourse,
+  approvePlan,
+  backToDraft,
   codeOf,
   confirmCourse,
   explain,
@@ -19,9 +21,12 @@ import {
   getPrerequisites,
   getStudentExtras,
   moveCourse,
+  overrideCourse,
   PlanApiError,
   removeCourse,
+  reopenPlan,
   restoreCourse,
+  submitForReview,
   swapCourse,
   type Alternative,
   type CourseOptions,
@@ -33,10 +38,12 @@ import {
 import type { Advisor } from "@/lib/useAdvisorSession";
 import { BoardCanvas } from "./BoardCanvas";
 import {
+  ApproveDialog,
   CoursePicker,
   GenerateDialog,
   GeneratingBanner,
   NoticeBanner,
+  OverrideDialog,
   RemoveDialog,
   Toast,
   type Dependents,
@@ -69,7 +76,12 @@ type Dialog =
   | null
   | { kind: "generate"; planId: number; status: PlanResponse["plan"]["status"] }
   | { kind: "picker"; term: TermRef }
-  | { kind: "remove"; course: BoardCourse };
+  | { kind: "remove"; course: BoardCourse }
+  // the problems that block approval
+  | { kind: "approve" }
+  // the written reason for an override. `course` null: every remaining problem, then approve.
+  // `from`: where it was opened, and where a single-course override returns to.
+  | { kind: "override"; course: CourseRef | null; from: "approve" | "panel" };
 
 type Generation =
   | { status: "idle" }
@@ -103,11 +115,13 @@ function Shell({
   advisor,
   left,
   generate,
+  actions,
   children,
 }: {
   advisor: Advisor;
   left?: React.ReactNode;
   generate?: { label: string; disabled: boolean; onClick: () => void };
+  actions?: React.ReactNode; // the review and approval buttons, once the plan is loaded
   children: React.ReactNode;
 }) {
   return (
@@ -137,10 +151,11 @@ function Shell({
         >
           {generate?.label ?? "Generate draft plan"}
         </Button>
-        {/* Approval and overrides come in the next pass. */}
-        <Button size="sm" full={false} disabled className="max-lg:hidden">
-          Approve plan
-        </Button>
+        {actions ?? (
+          <Button size="sm" full={false} disabled className="max-lg:hidden">
+            Approve plan
+          </Button>
+        )}
         <Avatar name={advisor.name} size="md" />
       </TopBar>
       <div className="flex min-h-0 flex-1">{children}</div>
@@ -164,6 +179,7 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
   const [noteErrors, setNoteErrors] = useState<Record<string, string>>({});
   const [pickerError, setPickerError] = useState<PickerError | null>(null);
   const [pickerBusyId, setPickerBusyId] = useState<number | null>(null);
+  const [overrideError, setOverrideError] = useState<string | null>(null);
   const [generation, setGeneration] = useState<Generation>({ status: "idle" });
   const generating = useRef<AbortController | null>(null);
 
@@ -415,6 +431,49 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
     );
   }
 
+  // ---- review and approval
+
+  // Moves the plan between draft, in review and approved.
+  async function setStatus(action: () => Promise<unknown>, done: string, failed: string) {
+    const error = await change(action);
+    if (error) return setEditError({ title: failed, message: error.message });
+    setToast({ message: done });
+  }
+
+  const reopen = () => setStatus(() => reopenPlan(numericId, advisor.id), "Plan reopened. It can be edited again.", "Can’t reopen this plan");
+
+  async function approve() {
+    // The problems are already known from the plan object: show them instead of asking to be refused.
+    if (!plan.canApprove) return setDialog({ kind: "approve" });
+    const error = await change(() => approvePlan(numericId, advisor.id));
+    if (!error) {
+      setDialog(null);
+      return setToast({ message: `${firstName}’s plan is approved` });
+    }
+    if (error.code === "blocking_issues") {
+      // The plan changed since it was loaded. Read it again; the dialog lists what it has now.
+      setAttempt((n) => n + 1);
+      return setDialog({ kind: "approve" });
+    }
+    setDialog(null);
+    setEditError({ title: "Can’t approve this plan", message: error.message });
+  }
+
+  function openOverride(course: CourseRef | null, from: "approve" | "panel") {
+    setOverrideError(null);
+    setDialog({ kind: "override", course, from });
+  }
+
+  async function override(course: CourseRef | null, from: "approve" | "panel", note: string) {
+    setOverrideError(null);
+    const error = await change(() =>
+      course ? overrideCourse(numericId, course.courseId, advisor.id, note) : approvePlan(numericId, advisor.id, note),
+    );
+    if (error) return setOverrideError(error.message);
+    setDialog(course && from === "approve" ? { kind: "approve" } : null);
+    setToast({ message: course ? `Problem with ${course.code} overridden` : `${firstName}’s plan is approved` });
+  }
+
   // ---- generating a draft
 
   async function generate(replace: boolean) {
@@ -450,6 +509,8 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
   const pickerTerm = dialog?.kind === "picker" ? (terms.find((t) => t.code === dialog.term.code) ?? dialog.term) : null;
   const edited = new Date(plan.plan.updatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" });
   const planned = plan.terms.filter((t) => t.state === "planned");
+  const overriding = dialog?.kind === "override" ? dialog : null;
+  const { status } = plan.plan;
 
   return (
     <Shell
@@ -459,6 +520,33 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
         disabled: busy,
         onClick: () => generate(false),
       }}
+      actions={
+        status === "approved" ? (
+          <Button size="sm" full={false} disabled={busy} className="max-lg:hidden" onClick={reopen}>
+            Reopen plan
+          </Button>
+        ) : status === "archived" ? undefined : (
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              full={false}
+              disabled={busy || plan.items.length === 0}
+              className="max-lg:hidden"
+              onClick={() =>
+                status === "draft"
+                  ? setStatus(() => submitForReview(numericId, advisor.id), "Sent for review", "Can’t send this plan for review")
+                  : setStatus(() => backToDraft(numericId, advisor.id), "Back to draft", "Can’t move this plan back to draft")
+              }
+            >
+              {status === "draft" ? "Send for review" : "Back to draft"}
+            </Button>
+            <Button size="sm" full={false} disabled={busy || plan.items.length === 0} className="max-lg:hidden" onClick={approve}>
+              Approve plan
+            </Button>
+          </>
+        )
+      }
       left={
         <>
           <span className="h-7 w-[1.5px] flex-none bg-border-subtle" />
@@ -507,6 +595,7 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
           prerequisites={prerequisites}
           selected={selected}
           busy={busy}
+          canOverride={advisor.can_override}
           terms={terms}
           editError={editError}
           onDismissError={() => {
@@ -525,6 +614,8 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
           onConfirm={confirm}
           onSwap={swap}
           onRemove={openRemove}
+          onOverride={(course) => openOverride({ courseId: course.courseId, code: course.code, nodeId: course.id }, "panel")}
+          onReopen={reopen}
         />
       )}
 
@@ -555,6 +646,42 @@ export function PlanCanvas({ planId, advisor }: { planId: string; advisor: Advis
           onRemove={() =>
             remove({ courseId: dialog.course.courseId, code: dialog.course.code, nodeId: dialog.course.id }, dialog.course.termLabel)
           }
+        />
+      )}
+      {dialog?.kind === "approve" && (
+        <ApproveDialog
+          firstName={firstName}
+          issues={plan.blockingIssues}
+          canOverride={advisor.can_override}
+          busy={busy}
+          onView={(issue) => {
+            setDialog(null);
+            setSelectedId(`plan:${issue.code}`);
+          }}
+          onOverride={(issue) => openOverride({ courseId: issue.courseId!, code: issue.code! }, "approve")}
+          onOverrideAll={() => openOverride(null, "approve")}
+          onApprove={approve}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {overriding && (
+        <OverrideDialog
+          title={
+            overriding.course
+              ? `Override the problem with ${overriding.course.code}?`
+              : `Override ${plan.blockingIssues.length === 1 ? "this problem" : `all ${plan.blockingIssues.length} problems`} and approve?`
+          }
+          problems={(overriding.course
+            ? (plan.items.find((i) => i.courseId === overriding.course!.courseId)?.issues ?? []).filter(
+                (i) => i.severity === "high" && !i.overridden,
+              )
+            : plan.blockingIssues
+          ).map((i) => i.message)}
+          confirmLabel={overriding.course ? "Override" : "Override and approve"}
+          busy={busy}
+          error={overrideError}
+          onCancel={() => setDialog(overriding.from === "approve" ? { kind: "approve" } : null)}
+          onConfirm={(note) => override(overriding.course, overriding.from, note)}
         />
       )}
       {pickerTerm && (

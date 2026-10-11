@@ -195,7 +195,9 @@ async function main() {
   r = await call("plans/[id]/courses/[courseId]/route.ts", "PATCH", `/api/plans/${P}/courses/${cop4331}`, { id: P, courseId: String(cop4331) }, { termCode: "fall-2026", advisorId: AVERY });
   check("move COP 4331 into the current term -> 422 with 'Move to Spring 2027' hint", r.status === 422 && r.body.suggestedTerm?.code === "spring-2027", r.body);
   r = await call("plans/[id]/courses/[courseId]/route.ts", "PATCH", `/api/plans/${P}/courses/${cop4331}`, { id: P, courseId: String(cop4331) }, { termCode: "fall-2027", advisorId: AVERY });
-  check("moving a prerequisite later flags the course that depends on it", r.status === 200 && item(r.body, "COP 4934").issues.some((x: any) => x.type === "not_eligible") && r.body.canApprove === false, { blocking: r.body.blocking });
+  check("moving a prerequisite later than its dependent -> 422 breaks_dependent naming COP 4934", r.status === 422 && r.body.code === "check_failed" && r.body.breaks?.[0]?.code === "COP 4934" && r.body.problems.some((x: any) => x.type === "breaks_dependent"), r.body);
+  r = await call("plans/[id]/courses/[courseId]/route.ts", "PATCH", `/api/plans/${P}/courses/${cop4331}`, { id: P, courseId: String(cop4331) }, { termCode: "fall-2027", advisorId: AVERY, force: true });
+  check("an authorized advisor can force it; the dependent is then flagged", r.status === 200 && item(r.body, "COP 4934").issues.some((x: any) => x.type === "not_eligible") && r.body.canApprove === false, { blocking: r.body.blocking });
   r = await call("plans/[id]/courses/[courseId]/route.ts", "PATCH", `/api/plans/${P}/courses/${cop4331}`, { id: P, courseId: String(cop4331) }, { termCode: "spring-2027", advisorId: AVERY });
   check("...and moving it back clears that", r.status === 200 && item(r.body, "COP 4934").issues.every((x: any) => x.type !== "not_eligible"));
 
@@ -439,6 +441,13 @@ async function main() {
   r = await add({ courseId: c4331, termCode: "spring-2028" });
   check("COP 4331 into Spring 2028", r.status === 201 && zItem(r.body, "COP 4331").termCode === "spring-2028", r.body.problems);
 
+  // moving a prerequisite must not break a course that depends on it (COP 4331 is in Spring 2028, after COP 3503 and COP 3330)
+  r = await move(c3330, { termCode: "spring-2028", dryRun: true });
+  check("hover: moving COP 3330 into COP 4331's semester is blocked, naming the course it would break", r.status === 200 && r.body.blocking === true && r.body.problems.some((p: any) => p.type === "breaks_dependent") && r.body.breaks?.[0]?.code === "COP 4331" && r.body.suggestedTerm?.code === "spring-2027", r.body);
+  r = await move(c3330, { termCode: "spring-2028" });
+  check("drop: 422 check_failed with `breaks`", r.status === 422 && r.body.code === "check_failed" && r.body.breaks?.[0]?.code === "COP 4331", r.body);
+  r = await move(c3330, { termCode: "fall-2027", dryRun: true });
+  check("a move that keeps every dependent valid stays allowed", r.status === 200 && r.body.blocking === false && r.body.breaks.length === 0, r.body.problems);
   r = await move(c4210, { termCode: "fall-2026", dryRun: true });
   check("hover over a finished term: dryRun says it cannot go there", r.status === 200 && r.body.dryRun === true && r.body.moves === "COT 4210" && r.body.problems.some((p: any) => p.type === "term_not_open"), r.body);
   r = await move(c4331, { termCode: "fall-2027", dryRun: true });

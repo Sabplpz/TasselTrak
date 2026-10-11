@@ -64,11 +64,16 @@ export async function listStudents(search: string | null, limit: number, offset:
   };
 }
 
-export async function loginStudent(studentId: number) {
+// The student is found by id, or by the email of the signed-in account (students.email, any case).
+export async function loginStudent(by: { studentId: number } | { email: string }) {
+  const studentId = "studentId" in by ? by.studentId : null;
+  const email = "email" in by ? by.email : null;
   const [s] = (await sql`
     SELECT s.id, s.display_name, s.program_id, p.name AS program_name,
            (SELECT COUNT(*)::int FROM completed_courses cc WHERE cc.student_id = s.id) AS n
-    FROM students s LEFT JOIN programs p ON p.id = s.program_id WHERE s.id = ${studentId}`) as any[];
+    FROM students s LEFT JOIN programs p ON p.id = s.program_id
+    WHERE s.id = ${studentId}::int OR lower(s.email) = lower(${email}::text)
+    ORDER BY s.id LIMIT 1`) as any[];
   if (!s) throw new ApiError("student_not_found", "Student not found", 404);
   return {
     studentId: s.id as number,

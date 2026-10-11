@@ -15,6 +15,7 @@ export const BADGE_ICON = {
   lock: "/plan/conflict-lock.svg",
   clock: "/plan/conflict-clock.svg",
   warning: "/advisor/risk-high.svg",
+  override: "/login/check.svg",
 };
 
 // ---- Board model
@@ -53,7 +54,7 @@ export type BoardCourse = {
   // For a course that is not planned yet: whether each plan term would take it, and if not, what
   // it is waiting on. A term that is missing here is one the API gave no answer for.
   fit: Record<string, { met: boolean; missing: string[] }>;
-  badge?: { kind: "lock" | "clock" | "warning"; text: string };
+  badge?: { kind: keyof typeof BADGE_ICON; text: string };
   column: number;
   x: number;
   y: number;
@@ -95,6 +96,7 @@ function needsText(issue: PlanIssue, code: string) {
 function badgeFor(item: PlanItem): BoardCourse["badge"] {
   const issue = item.issues.find((i) => i.severity === "high");
   if (!issue) return undefined;
+  if (item.override) return { kind: "override", text: "Overridden" };
   if (issue.type === "not_eligible") return { kind: "lock", text: needsText(issue, item.code) };
   if (issue.type === "time_conflict") return { kind: "clock", text: "Time clash" };
   return { kind: "warning", text: humanize(issue.type) };

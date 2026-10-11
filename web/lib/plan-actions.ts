@@ -34,6 +34,7 @@ function checkFailed(check: any) {
     missing: check.missing,
     blockingCourse: check.blockingCourse,
     suggestedTerm: check.suggestedTerm,
+    breaks: check.breaks,
     term: check.term,
   });
 }
@@ -116,7 +117,7 @@ export async function moveItem(planId: number, itemId: number, b: Body) {
   const who = actorOf(b);
   if (!b.dryRun) await assertEditable(planId, who);
 
-  const check = await checkAddition(planId, item.course_id, { replaceItemId: itemId, termCode, ignoreSeats: who.type === "student" });
+  const check = await checkAddition(planId, item.course_id, { replaceItemId: itemId, termCode, ignoreSeats: who.type === "student", moving: true });
   if (!check.found) return failCode("course_not_found", "Course not found", 404);
   if (b.dryRun) return ok({ dryRun: true, moves: item.code, ...check });
   if (check.blocking && !b.force) return checkFailed(check);
