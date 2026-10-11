@@ -8,6 +8,11 @@ import { TopBar } from "@/components/TopBar";
 import { Button, TextButton } from "@/components/Button";
 import { Avatar, Pill } from "@/components/Chip";
 
+import { useRouter } from "next/navigation";
+import { signOut } from "firebase/auth";
+import { auth } from "@/lib/firebase";
+import { useStudentSession } from "@/lib/useStudentSession";
+
 type Theme = "light" | "dark";
 
 function Mark() {
@@ -120,6 +125,17 @@ export default function UploadPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const router = useRouter();
+const { user, name, loading } = useStudentSession();
+
+async function handleSignOut() {
+  try {
+    await signOut(auth);
+    router.replace("/login");
+  } catch {
+    setError("Unable to sign out. Please try again.");
+  }
+}
 
   useEffect(() => {
     const saved = window.localStorage.getItem("tasseltrak-theme");
@@ -173,18 +189,14 @@ export default function UploadPage() {
   data-theme={theme}
 >
     <TopBar surface tag={<Pill tone="gold">Student</Pill>}>
+  <span className="truncate text-body-14 text-ink-secondary max-md:hidden">
+    {loading ? "Loading account…" : name}
+  </span>
 
+  <Avatar name={name || "Student"} size="md" />
 
-    <Avatar name="Student" size="md" />
-
-    <TextButton
-      onClick={() =>
-        setNotice("Connect this button to your existing sign-out handler.")
-      }
-    >
-      Sign out
-    </TextButton>
-  </TopBar>
+  <TextButton onClick={handleSignOut}>Sign out</TextButton>
+</TopBar>
 
       <section className={styles.hero} aria-labelledby="hero-title">
         <div className={styles.backgroundArt} aria-hidden="true">
