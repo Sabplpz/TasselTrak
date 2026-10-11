@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "../../lib/firebase";
 import { useRouter } from "next/navigation";
@@ -44,7 +44,26 @@ function CheckCircle({ filled = false }: { filled?: boolean }) {
   );
 }
 
+type Theme = "light" | "dark";
 export default function LoginPage() {
+
+  const [theme, setTheme] = useState<Theme>("dark");
+
+useEffect(() => {
+  const savedTheme = window.localStorage.getItem("tasseltrak-theme");
+
+  if (savedTheme === "light" || savedTheme === "dark") {
+    setTheme(savedTheme);
+  }
+}, []);
+
+function toggleTheme() {
+  const nextTheme = theme === "dark" ? "light" : "dark";
+
+  setTheme(nextTheme);
+  window.localStorage.setItem("tasseltrak-theme", nextTheme);
+}
+
   const router = useRouter();
 
   const [role, setRole] = useState<Role>("advisor");
@@ -78,24 +97,41 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="tt-page">
+    <main className="tt-page" data-theme={theme}>
       <style>{css}</style>
 
       <div className="tt-dots" />
       <div className="tt-glow" />
 
       {/* Top nav */}
-      <header className="tt-nav">
-        <div className="tt-brand">
-          <span className="tt-brand-icon">
-            <CapIcon size={18} />
-          </span>
-          <span>TasselTrak</span>
-        </div>
-        <a href="#how" className="tt-nav-link">
-          How it works
-        </a>
-      </header>
+      
+
+
+<header className="tt-nav">
+  <div className="tt-brand">
+    <span className="tt-brand-icon">
+      <CapIcon size={18} />
+    </span>
+    <span>TasselTrak</span>
+  </div>
+
+  <div className="tt-nav-actions">
+    <a href="#how" className="tt-nav-link">
+      How it works
+    </a>
+
+    <button
+      type="button"
+      className="tt-theme-toggle"
+      onClick={toggleTheme}
+    >
+      <span aria-hidden="true">
+        {theme === "dark" ? "☀️" : "🌙"}
+      </span>
+      {theme === "dark" ? "Light mode" : "Dark mode"}
+    </button>
+  </div>
+</header>
 
       {/* Connector lines between floating cards */}
       <svg className="tt-lines" viewBox="0 0 1053 750" preserveAspectRatio="none" aria-hidden="true">
@@ -288,6 +324,26 @@ export default function LoginPage() {
 }
 
 const css = `
+.tt-page[data-theme="light"] {
+  background: #f7f6f0;
+  color: #202019;
+}
+
+.tt-theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid #484842;
+  border-radius: 999px;
+  background: #292925;
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
   .tt-page {
     position: relative;
     min-height: 100vh;
