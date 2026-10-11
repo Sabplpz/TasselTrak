@@ -26,6 +26,8 @@ async function main() {
   const m003 = readFileSync(resolve(__dirname, "../../migrations/003_figma_alignment.sql"), "utf8");
   for (const f of ["00_schema", "01_risk_and_stubs", "02_migration"]) await pg.exec(readFileSync(`${__dirname}/sql/${f}.sql`, "utf8"));
   await pg.exec(m003);
+  const m004 = readFileSync(resolve(__dirname, "../../migrations/004_student_side.sql"), "utf8");
+  await pg.exec(m004);
   await pg.exec(readFileSync(`${__dirname}/sql/04_seed.sql`, "utf8"));
   // migration 003 must be re-runnable
   await pg.exec(m003);

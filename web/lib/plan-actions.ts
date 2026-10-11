@@ -1,8 +1,15 @@
 import { sql } from "@/lib/db";
 import { ok, failCode, toId, ApiError } from "@/lib/api";
-import { assertEditable, checkAddition, getAdvisor, getPlan, logEvent, touchPlan } from "@/lib/plan";
+import { Actor, asActor, assertEditable, checkAddition, getAdvisor, getPlan, logEvent, touchPlan } from "@/lib/plan";
 
 type Body = Record<string, any>;
+
+// Student routes set `__studentId` themselves after parsing the body; a client cannot send it
+// (the routes overwrite it). Anything else is an advisor edit.
+export const actorOf = (b: Body): Actor =>
+  Number.isInteger(b.__studentId) && b.__studentId > 0
+    ? { type: "student", id: b.__studentId }
+    : { type: "advisor", id: toId(String(b.advisorId ?? "")) };
 
 const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 
@@ -45,8 +52,9 @@ async function overrideFor(b: Body, blocking: boolean, why: string) {
 export async function addCourse(planId: number, b: Body) {
   const courseId = toId(String(b.courseId ?? ""));
   if (!courseId) return failCode("invalid_request", "courseId is required", 400);
-  if (!b.dryRun) await assertEditable(planId);
-  const check = await checkAddition(planId, courseId, { termCode: str(b.termCode) });
+  const who = actorOf(b);
+  if (!b.dryRun) await assertEditable(planId, who);
+  const check = await checkAddition(planId, courseId, { termCode: str(b.termCode), ignoreSeats: who.type === "student" });
   if (!check.found) return failCode("course_not_found", "Course not found", 404);
   if (b.dryRun) return ok({ dryRun: true, ...check });
   if (check.blocking && !b.force) return checkFailed(check);
@@ -55,9 +63,9 @@ export async function addCourse(planId: number, b: Body) {
   await sql`
     INSERT INTO plan_items (plan_id, term_id, course_id, section_id, reason, source, confirmed, override_by, override_note, override_at)
     VALUES (${planId}, ${check.termId}, ${courseId}, ${check.section?.id ?? null},
-            ${str(b.reason) ?? "Added by advisor."}, 'advisor', TRUE,
+            ${str(b.reason) ?? `Added by ${who.type}.`}, ${who.type}, TRUE,
             ${ov.by}, ${ov.note}, CASE WHEN ${ov.by}::int IS NULL THEN NULL ELSE NOW() END)`;
-  await logEvent(planId, toId(String(b.advisorId ?? "")), "added_course", {
+  await logEvent(planId, who, "added_course", {
     code: check.course.code, courseId, termCode: check.term.code, forced: !!ov.by, problems: check.problems.map((p) => p.message),
   });
   await touchPlan(planId);
@@ -88,7 +96,7 @@ export async function swapItem(planId: number, itemId: number, b: Body) {
             override_by = ${ov.by}, override_note = ${ov.note},
             override_at = CASE WHEN ${ov.by}::int IS NULL THEN NULL ELSE NOW() END
             WHERE id = ${itemId}`;
-  await logEvent(planId, toId(String(b.advisorId ?? "")), "swapped_course", {
+  await logEvent(planId, actorOf(b), "swapped_course", {
     from: item.code, to: check.course.code, termCode: item.term_code, forced: !!ov.by, problems: check.problems.map((x) => x.message),
   });
   await touchPlan(planId);
@@ -105,19 +113,22 @@ export async function moveItem(planId: number, itemId: number, b: Body) {
     JOIN courses c ON c.id = pi.course_id JOIN terms t ON t.id = pi.term_id
     WHERE pi.id = ${itemId} AND pi.plan_id = ${planId}`) as any[];
   if (!item) return itemNotFound();
-  if (!b.dryRun) await assertEditable(planId);
+  const who = actorOf(b);
+  if (!b.dryRun) await assertEditable(planId, who);
 
-  const check = await checkAddition(planId, item.course_id, { replaceItemId: itemId, termCode });
+  const check = await checkAddition(planId, item.course_id, { replaceItemId: itemId, termCode, ignoreSeats: who.type === "student" });
   if (!check.found) return failCode("course_not_found", "Course not found", 404);
   if (b.dryRun) return ok({ dryRun: true, moves: item.code, ...check });
   if (check.blocking && !b.force) return checkFailed(check);
 
   const ov = await overrideFor(b, check.blocking, `Moved to ${check.term.name} with an override.`);
-  await sql`UPDATE plan_items SET term_id = ${check.termId}, section_id = ${check.section?.id ?? null}, confirmed = TRUE,
+  // A student moving a course does not "confirm" an advisor's or the planner's suggestion.
+  await sql`UPDATE plan_items SET term_id = ${check.termId}, section_id = ${check.section?.id ?? null},
+            confirmed = CASE WHEN ${who.type === "student"} THEN confirmed ELSE TRUE END,
             override_by = COALESCE(${ov.by}, override_by), override_note = COALESCE(${ov.note}, override_note),
             override_at = CASE WHEN ${ov.by}::int IS NULL THEN override_at ELSE NOW() END
             WHERE id = ${itemId}`;
-  await logEvent(planId, toId(String(b.advisorId ?? "")), "moved_course", {
+  await logEvent(planId, who, "moved_course", {
     code: item.code, courseId: item.course_id, from: item.term_code, to: check.term.code, forced: !!ov.by,
   });
   await touchPlan(planId);
@@ -126,8 +137,8 @@ export async function moveItem(planId: number, itemId: number, b: Body) {
 
 // ---------------------------------------------------------------- remove + undo
 
-export async function removeItem(planId: number, itemId: number, advisorId: number | null) {
-  await assertEditable(planId);
+export async function removeItem(planId: number, itemId: number, who: number | null | Actor) {
+  await assertEditable(planId, asActor(who));
   const [row] = (await sql`
     SELECT pi.id, pi.course_id, pi.term_id, pi.section_id, pi.reason, pi.source, pi.confirmed,
            pi.override_by, pi.override_note, c.code, t.code AS term_code
@@ -136,7 +147,7 @@ export async function removeItem(planId: number, itemId: number, advisorId: numb
   if (!row) return itemNotFound();
   await sql`DELETE FROM plan_items WHERE id = ${itemId}`;
   // The snapshot is what "Undo" restores.
-  await logEvent(planId, advisorId, "removed_course", {
+  await logEvent(planId, who, "removed_course", {
     code: row.code, courseId: row.course_id, termId: row.term_id, termCode: row.term_code, sectionId: row.section_id,
     reason: row.reason, source: row.source, confirmed: row.confirmed, overrideBy: row.override_by, overrideNote: row.override_note,
   });
@@ -144,8 +155,8 @@ export async function removeItem(planId: number, itemId: number, advisorId: numb
   return ok({ ...(await getPlan(planId)), removed: { courseId: row.course_id, code: row.code, termCode: row.term_code } });
 }
 
-export async function restoreCourse(planId: number, courseId: number, advisorId: number | null) {
-  await assertEditable(planId);
+export async function restoreCourse(planId: number, courseId: number, who: number | null | Actor) {
+  await assertEditable(planId, asActor(who));
   const [ev] = (await sql`
     SELECT e.id, e.detail FROM plan_events e
     WHERE e.plan_id = ${planId} AND e.action = 'removed_course' AND (e.detail->>'courseId')::int = ${courseId}
@@ -163,7 +174,7 @@ export async function restoreCourse(planId: number, courseId: number, advisorId:
     VALUES (${planId}, ${d.termId}, ${courseId}, ${n ? d.sectionId : null}, ${d.reason ?? null}, ${d.source ?? "advisor"},
             ${!!d.confirmed}, ${d.overrideBy ?? null}, ${d.overrideNote ?? null},
             CASE WHEN ${d.overrideBy ?? null}::int IS NULL THEN NULL ELSE NOW() END)`;
-  await logEvent(planId, advisorId, "restored_course", { code: d.code, courseId, termCode: d.termCode });
+  await logEvent(planId, who, "restored_course", { code: d.code, courseId, termCode: d.termCode });
   await touchPlan(planId);
   return ok({ ...(await getPlan(planId)), restored: { courseId, code: d.code, termCode: d.termCode } });
 }

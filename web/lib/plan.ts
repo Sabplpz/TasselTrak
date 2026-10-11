@@ -383,8 +383,8 @@ export async function getPlan(planId: number) {
     });
 
   const events = (await sql`
-    SELECT e.id, e.actor_type, e.action, e.detail, e.created_at, a.name AS advisor_name
-    FROM plan_events e LEFT JOIN advisors a ON a.id = e.advisor_id
+    SELECT e.id, e.actor_type, e.action, e.detail, e.created_at, a.name AS advisor_name, st.display_name AS student_name
+    FROM plan_events e LEFT JOIN advisors a ON a.id = e.advisor_id LEFT JOIN students st ON st.id = e.student_id
     WHERE e.plan_id = ${planId} ORDER BY e.created_at, e.id`) as any[];
 
   const planCredits = outItems.reduce((s, i) => s + i.credits, 0);
@@ -434,10 +434,21 @@ export async function getPlan(planId: number) {
 // ---------------------------------------------------------------- checking an edit
 
 // Can this course go into `termCode` (default: the next term), optionally replacing one item?
-export async function checkAddition(planId: number, courseId: number, opts: { replaceItemId?: number; termCode?: string } = {}) {
+export async function checkAddition(planId: number, courseId: number, opts: { replaceItemId?: number; termCode?: string; ignoreSeats?: boolean } = {}) {
   const [plan] = (await sql`SELECT student_id FROM plans WHERE id = ${planId}`) as any[];
   if (!plan) throw new ApiError("plan_not_found", "Plan not found", 404);
-  const ctx = await loadCtx(plan.student_id);
+  return checkAdditionFor(plan.student_id, planId, courseId, opts);
+}
+
+// Same check for a student who may not have a plan yet (`planId` null = an empty board). Students use this
+// for dryRun while dragging, before anything has been saved.
+export async function checkAdditionFor(
+  studentId: number,
+  planId: number | null,
+  courseId: number,
+  opts: { replaceItemId?: number; termCode?: string; ignoreSeats?: boolean } = {}
+) {
+  const ctx = await loadCtx(studentId);
   const term = opts.termCode ? byCode(ctx.terms, opts.termCode) : ctx.planTerm;
   if (!term) throw new ApiError("term_not_found", `Unknown term '${opts.termCode}'`, 400);
 
@@ -446,7 +457,7 @@ export async function checkAddition(planId: number, courseId: number, opts: { re
 
   const others = (await sql`
     SELECT pi.id, pi.course_id, pi.section_id, pi.term_id FROM plan_items pi
-    WHERE pi.plan_id = ${planId} AND pi.id <> ${opts.replaceItemId ?? 0}`) as any[];
+    WHERE pi.plan_id = ${planId ?? 0} AND pi.id <> ${opts.replaceItemId ?? 0}`) as any[];
   const plannedOthers: Planned[] = others.map((o) => ({ courseId: o.course_id, termKey: (byId(ctx.terms, o.term_id) as Term).key }));
 
   const duplicate = others.some((o) => o.course_id === courseId);
@@ -472,7 +483,8 @@ export async function checkAddition(planId: number, courseId: number, opts: { re
   if (ctx.current && term.key <= ctx.currentKey)
     problems.push({ ...base, type: "term_not_open", severity: "high", message: `${term.name} has already started or finished, so courses can only be planned for later terms.` });
   if (!inProgram) problems.push({ ...base, type: "not_in_program", severity: "low", message: `${course.code} is not a listed requirement for this program.` });
-  if (scheduled && !isSlot(course.code)) {
+  // Seat tracking is not part of the student side: students are never blocked by sections or seats.
+  if (scheduled && !isSlot(course.code) && !opts.ignoreSeats) {
     if (!secs.length) problems.push({ ...base, type: "no_section", severity: "high", message: `${course.code} has no section in ${term.name}.` });
     else if (!section) problems.push({ ...base, type: "time_conflict", severity: "high", message: `Every open section of ${course.code} conflicts with the plan or is full.` });
   }
@@ -617,9 +629,18 @@ export async function dependents(planId: number, courseId: number) {
 
 // ---------------------------------------------------------------- status + audit
 
-export async function logEvent(planId: number, advisorId: number | null, action: string, detail: object) {
-  await sql`INSERT INTO plan_events (plan_id, actor_type, advisor_id, action, detail)
-            VALUES (${planId}, 'advisor', ${advisorId}, ${action}, ${JSON.stringify(detail)}::jsonb)`;
+// Who made an edit. Routes build this themselves (never from the request body) so a student cannot pose as an advisor.
+export type Actor = { type: "advisor"; id: number | null } | { type: "student"; id: number };
+
+// An advisor id (older callers) or an Actor.
+export const asActor = (who: number | null | Actor): Actor =>
+  who !== null && typeof who === "object" ? who : { type: "advisor", id: who };
+
+export async function logEvent(planId: number, who: number | null | Actor, action: string, detail: object) {
+  const a = asActor(who);
+  await sql`INSERT INTO plan_events (plan_id, actor_type, advisor_id, student_id, action, detail)
+            VALUES (${planId}, ${a.type}, ${a.type === "advisor" ? a.id : null}, ${a.type === "student" ? a.id : null},
+                    ${action}, ${JSON.stringify(detail)}::jsonb)`;
 }
 
 // Any advisor edit puts the plan back to Draft and clears an earlier review or approval.
@@ -629,7 +650,7 @@ export async function touchPlan(planId: number) {
 }
 
 // Edits are refused on an approved (read-only) or archived plan.
-export async function assertEditable(planId: number) {
+export async function assertEditable(planId: number, who?: number | null | Actor) {
   const [p] = (await sql`SELECT id, status FROM plans WHERE id = ${planId}`) as any[];
   if (!p) throw new ApiError("plan_not_found", "Plan not found", 404);
   if (p.status === "approved")

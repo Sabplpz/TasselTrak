@@ -1,5 +1,5 @@
 {
-  "name": "tasseltrak-figma-alignment-tests",
+  "name": "tasseltrak-figma-alignment-students-tests",
   "private": true,
   "scripts": { "test": "tsx --tsconfig tsconfig.json run.ts",
     "typecheck": "tsc -p tsconfig.check.json" },

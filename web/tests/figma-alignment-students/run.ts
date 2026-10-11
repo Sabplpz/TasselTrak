@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { pg, sql } from "./db";
 
 const R = resolve(__dirname, "../../app/api");
@@ -12,12 +13,13 @@ function check(name: string, cond: any, extra?: unknown) {
 const section = (s: string) => console.log("\n== " + s);
 
 async function call(file: string, method: string, url: string, params: Record<string, string> = {}, body?: any) {
-  const mod = await import(`${R}/${file}`);
+  const mod = await import(pathToFileURL(`${R}/${file}`).href); // file:// URL: required on Windows
   const req = new Request("http://x" + url, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const res = await mod[method](req, { params: Promise.resolve(params) });
   return { status: res.status as number, body: (await res.json()) as any };
 }
 const cid = async (code: string) => ((await sql`SELECT id FROM courses WHERE code = ${code}`) as any[])[0].id as number;
+const bc2 = (b: any, code: string) => b.courses.find((c: any) => c.code === code);
 const item = (plan: any, code: string) => plan.items.find((i: any) => i.code === code);
 
 async function main() {
@@ -105,7 +107,7 @@ async function main() {
   {
     const before = ((await sql`SELECT count(*)::int AS n FROM plans WHERE student_id = ${NORA}`) as any[])[0].n;
     const ac = new AbortController(); ac.abort();
-    const mod = await import(`${R}/students/[id]/plan/generate/route.ts`);
+    const mod = await import(pathToFileURL(`${R}/students/[id]/plan/generate/route.ts`).href);
     const res = await mod.POST(new Request("http://x/g", { method: "POST", signal: ac.signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ advisorId: AVERY, replace: true }) }), { params: Promise.resolve({ id: String(NORA) }) });
     const after = ((await sql`SELECT count(*)::int AS n FROM plans WHERE student_id = ${NORA}`) as any[])[0].n;
     check("cancelled generate (aborted request) saves nothing", res.status === 499 && before === after, { status: res.status, before, after });
@@ -517,6 +519,25 @@ async function main() {
   check("unknown term -> 400", r.status === 400 && r.body.code === "term_not_found");
   r = await detail(c4600, "", 99);
   check("unknown student -> 404", r.status === 404 && r.body.code === "student_not_found");
+
+  section("prerequisites outside the major (like COP 2500 before COP 3330)");
+  await sql`INSERT INTO courses (university_id, subject, number, title, credits) SELECT id, 'MAC', '1105', 'College Algebra', 3 FROM universities LIMIT 1`;
+  await sql`INSERT INTO courses (university_id, subject, number, title, credits) SELECT id, 'MAT', '1033', 'Pre-Algebra', 3 FROM universities LIMIT 1`;
+  const cMac1105 = await cid("MAC 1105"), cMat1033 = await cid("MAT 1033");
+  await sql`INSERT INTO prerequisites (course_id, required_course_id, kind, group_no) VALUES (${c3360}, ${cMac1105}, 'prereq', 5), (${cMac1105}, ${cMat1033}, 'prereq', 1)`;
+  r = await call("programs/[id]/courses/route.ts", "GET", `/api/programs/${csProgram}/courses`, { id: String(csProgram) });
+  const other = r.body.groups.find((g: any) => g.requirement === "other_prerequisites");
+  check("picker lists prerequisites outside the major, including prerequisites of prerequisites", other && other.courses.map((c: any) => c.code).join() === "MAC 1105,MAT 1033" && other.courses.every((c: any) => c.inProgram === false), other);
+  check("...and the major's own courses are marked inProgram", r.body.groups.filter((g: any) => g.requirement !== "other_prerequisites").every((g: any) => g.courses.every((c: any) => c.inProgram === true)));
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  check("board shows them as notes outside the major, with prerequisite lines", bc2(r.body, "MAC 1105")?.inProgram === false && bc2(r.body, "CIS 3360").prereq !== "available" && r.body.edges.some((e: any) => e.from === cMac1105 && e.to === c3360) && r.body.edges.some((e: any) => e.from === cMat1033 && e.to === cMac1105), r.body.edges.length);
+  check("...locked by what it needs", bc2(r.body, "MAC 1105").status === "locked" && bc2(r.body, "MAC 1105").needs.includes("MAT 1033"), bc2(r.body, "MAC 1105"));
+  await put({ mode: "merge", courses: [{ courseId: cMat1033, grade: "B" }, { courseId: cMac1105, grade: "A" }] });
+  r = await call("students/[id]/board/route.ts", "GET", `/api/students/${ZED}/board`, zp);
+  check("saving them works and the board marks them taken", bc2(r.body, "MAC 1105").status === "taken" && bc2(r.body, "MAT 1033").status === "taken", r.body.courses.filter((c: any) => !c.inProgram).map((c: any) => c.code + ":" + c.status));
+  await sql`DELETE FROM prerequisites WHERE required_course_id IN (${cMac1105}, ${cMat1033})`;
+  await sql`DELETE FROM completed_courses WHERE course_id IN (${cMac1105}, ${cMat1033})`;
+  await sql`DELETE FROM courses WHERE id IN (${cMac1105}, ${cMat1033})`;
 
   section("student edits do not break the advisor side");
   r = await call("advisors/[advisorId]/students/route.ts", "GET", `/api/advisors/${AVERY}/students`, { advisorId: String(AVERY) });

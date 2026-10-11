@@ -5,9 +5,9 @@ schema, migrations 001-004 and a small seed that mirrors the Figma's "Nora Reyes
 Nothing here touches Neon, the network, or a real LLM (`llm-mock.ts` returns a canned plan; set
 `MOCK_LLM=fail` to simulate a timeout).
 
-Put this folder at `web/tests/figma-alignment/` (next to `app/`, `lib/`, `migrations/`), then:
+Put this folder at `web/tests/figma-alignment-students/` (next to `app/`, `lib/`, `migrations/`), then:
 
-    cd tests/figma-alignment && npm install && npm test
+    cd tests/figma-alignment-students && npm install && npm test
 
 Keep it out of your Next build: it imports packages the app does not install. Add `"tests"` to the
 `exclude` list in the app's `tsconfig.json`.
