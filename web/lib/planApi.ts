@@ -36,7 +36,7 @@ export type PlanItem = {
   termCode: string;
   termName: string;
   reason: string | null;
-  source: "ai" | "advisor";
+  source: "ai" | "advisor" | "student";
   suggested: boolean; // proposed by the planner and not confirmed yet
   fills: string | null;
   status: "available" | "needs" | "locked";
